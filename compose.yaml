@@ -1,0 +1,10 @@
+services:
+  projectpilot:
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - pilot-data:/app/runs/web
+    restart: unless-stopped
+volumes:
+  pilot-data:

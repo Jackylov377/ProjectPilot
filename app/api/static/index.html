@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ProjectPilot · 项目工作台</title>
+  <link rel="stylesheet" href="/static/style.css?v=github-import-1"><script src="/static/app.js?v=github-import-1" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#chat"><span class="brand-mark">P</span><span>ProjectPilot<small>研发项目助手</small></span></a>
+    <div class="workspace"><span class="eyebrow">当前项目</span><strong id="workspace-name">正在连接…</strong><span id="workspace-path"></span></div>
+    <div class="nav-label">工作空间</div>
+    <nav aria-label="功能导航">
+      <button data-view="chat" class="active"><span>◈</span>工作对话</button>
+      <button data-view="knowledge"><span>▤</span>知识资料</button>
+      <button data-view="runs"><span>↗</span>运行记录</button>
+      <button data-view="evaluations"><span>▥</span>评测中心</button>
+      <button data-view="memory"><span>◇</span>项目记忆</button>
+      <button data-view="backlog"><span>☷</span>待办与缺陷 <b id="backlog-count">—</b></button>
+    </nav>
+    <div class="sidebar-footer"><span class="dot"></span> 本地工作台 <small>先打通流程，再持续完善</small></div>
+  </aside>
+  <main>
+    <header class="topbar"><span>工作空间 <span class="slash">/</span> <strong id="view-title">工作对话</strong></span><div class="top-actions"><label class="mode-label">运行模式 <select id="mode"><option value="offline">本地演示</option><option value="live" disabled>真实模型 · 未启用</option></select></label><span class="status-pill" id="connection">连接中</span></div></header>
+    <div id="notice" role="status" hidden></div>
+    <section id="panel-chat" class="panel">
+      <div class="page-heading"><div><span class="eyebrow">WORKSPACE / CHAT</span><h1>工作对话</h1><p>围绕项目提问，保留答案、来源和执行过程。</p></div><button class="secondary" id="new-session">＋ 新会话</button></div>
+      <div class="chat-layout">
+        <div class="chat-card">
+          <div class="chat-toolbar"><span class="dot"></span><strong>当前会话</strong><select id="session-list" aria-label="选择历史会话"><option value="demo">demo</option></select><span id="job-status">就绪</span></div>
+          <div id="messages" aria-live="polite"><div class="empty-state"><div class="empty-icon">◈</div><h2>从一个具体问题开始</h2><p>阅读项目笔记、整理代码结构，或从资料中寻找答案。</p><div class="suggestions"><button data-prompt="请读取 overview，说明示例项目的用途并引用文件名。">了解这个项目 ↗</button><button data-prompt="我们这个项目决定使用模型 A。" data-memory="true">记录一项项目决定 ↗</button></div></div></div>
+          <form id="chat-form"><textarea id="prompt" aria-label="输入问题" placeholder="输入你的问题，或描述要完成的任务…" rows="3" required maxlength="12000"></textarea><div class="composer-footer"><span id="mode-note">本地演示使用预设响应，仅验证操作流程。</span><div><button type="button" id="cancel-job" class="secondary" hidden>停止运行</button><button type="submit" class="primary" id="send">发送问题 <span>↑</span></button></div></div></form>
+        </div>
+        <aside class="settings-card"><span class="eyebrow">本次任务</span><h3>执行设置</h3><label>任务类型<select id="engine"><option value="session">项目对话</option><option value="repository">仓库分析与报告</option><option value="knowledge">知识资料问答</option></select></label><div id="repository-settings" hidden>
+<label>分析仓库<select id="repository-select"><option value="">启动时项目</option></select></label>
+<label>GitHub仓库链接<input id="repository-url" type="url" placeholder="https://github.com/owner/repo" aria-label="GitHub仓库链接"></label>
+<button type="button" id="import-repository" class="secondary">获取源码</button>
+<p class="helper">支持公开仓库的默认分支。导入完成后输入问题，即可分析源码。</p>
+</div><label>会话名称<input id="session" value="demo" pattern="[A-Za-z0-9_-]{1,64}" maxlength="64"></label><label>长对话策略<select id="context-policy"><option value="window">保留最近对话</option><option value="full">保留完整历史</option><option value="summary">摘要与任务状态</option></select></label><label class="check"><input type="checkbox" id="use-memory"> 使用项目记忆</label><p class="helper">记忆可在同一项目的不同会话中延续，按任务类型和运行模式分别保存。</p><div class="knowledge-selection" id="knowledge-selection" hidden><strong>本次选中的资料</strong><p id="selected-documents">尚未选择</p><button data-goto="knowledge" class="text-button">前往选择资料 →</button></div><div class="setting-note"><span>过程记录</span><p id="progress-text">发送任务后，可在这里看到执行进度。</p><button class="text-button" data-goto="runs">查看完整运行记录 →</button></div></aside>
+      </div>
+    </section>
+    <section id="panel-knowledge" class="panel" hidden>
+      <div class="page-heading"><div><span class="eyebrow">WORKSPACE / KNOWLEDGE</span><h1>知识资料</h1><p>导入资料，选择本次问答需要使用的文件。</p></div><label class="primary upload-button">＋ 导入资料<input id="upload" type="file" accept=".md,.txt,.pdf" hidden></label></div>
+      <div class="two-columns"><div class="surface"><div class="surface-heading"><h3>资料库 <span id="document-count"></span></h3><button class="text-button" id="ask-documents">用选中资料提问 →</button></div><p class="helper">支持 TXT、Markdown 和带文字层的 PDF，单份最多 4 MB。</p><div id="documents" class="list"></div></div><div class="surface"><div class="surface-heading"><h3 id="preview-title">资料预览</h3></div><pre id="document-preview" class="document-preview">选择一份资料查看内容。</pre></div></div>
+    </section>
+    <section id="panel-runs" class="panel" hidden>
+      <div class="page-heading"><div><span class="eyebrow">WORKSPACE / ACTIVITY</span><h1>运行记录</h1><p>查看每次执行的状态、工具调用和最终交付。</p></div><button class="secondary" id="refresh-runs">刷新记录</button></div>
+      <div class="two-columns"><div id="runs-list" class="surface list"></div><div class="surface"><h3>运行详情</h3><div id="run-detail" class="detail empty-copy">选择左侧记录查看详情。</div></div></div>
+    </section>
+    <section id="panel-evaluations" class="panel" hidden>
+      <div class="page-heading"><div><span class="eyebrow">WORKSPACE / EVALUATION</span><h1>评测中心</h1><p>固定任务、对照配置，分别查看通过、失败与待复核项。</p></div><button class="secondary" id="refresh-evaluations">刷新报告</button></div>
+      <div class="surface eval-launch"><div><h3>发起开发评测</h3><p class="helper">先用少量任务检查流程；本地演示结果不代表真实模型能力。</p></div><form id="eval-form"><label>任务选择<select id="eval-cases" multiple size="4" aria-label="选择评测任务"></select></label><div class="eval-controls"><label class="check"><input type="checkbox" name="eval-config" value="full" checked> 完整历史</label><label class="check"><input type="checkbox" name="eval-config" value="window"> 最近窗口</label><label class="check"><input type="checkbox" name="eval-config" value="summary"> 摘要</label><label class="check"><input type="checkbox" name="eval-config" value="memory-off"> 关闭记忆</label><label>重复次数<input id="eval-repeats" type="number" min="1" max="3" value="1"></label><button class="text-button" type="button" id="select-all-cases">选择全部任务</button><button class="primary" type="submit" id="start-evaluation">开始评测</button></div></form></div>
+      <div id="evaluation-list" class="evaluation-grid"></div><div id="evaluation-detail" class="surface" hidden></div>
+    </section>
+    <section id="panel-memory" class="panel" hidden>
+      <div class="page-heading"><div><span class="eyebrow">WORKSPACE / MEMORY</span><h1>项目记忆</h1><p>查看长期保留的项目决定、偏好和原始来源。</p></div><button class="secondary" id="refresh-memory">刷新记忆</button></div>
+      <div class="surface"><div class="memory-filters"><label>任务范围<select id="memory-engine"><option value="session">项目对话</option><option value="repository">仓库分析</option><option value="knowledge">知识问答</option></select></label><label class="check"><input type="checkbox" id="memory-history"> 包含已替代、撤回与候选记录</label></div><div id="memory-list" class="list"></div></div>
+    </section>
+    <section id="panel-backlog" class="panel" hidden>
+      <div class="page-heading"><div><span class="eyebrow">WORKSPACE / BACKLOG</span><h1>待办与缺陷</h1><p>保留发现的问题，先完成整体框架，再集中处理细节。</p></div><span class="status-pill">按当前推进策略暂缓</span></div><div id="backlog-policy" class="policy-note"></div><div id="backlog-list" class="backlog-grid"></div>
+    </section>
+    <footer class="page-footer"><span>ProjectPilot · 可追溯的研发工作空间</span><span>当前为本地应用骨架，阶段验收状态独立保留</span></footer>
+  </main>
+</body>
+</html>

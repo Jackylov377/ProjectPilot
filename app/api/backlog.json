@@ -1,0 +1,11 @@
+{
+  "policy": "当前版本用于本地单用户操作。以下为已知限制与后续完善方向，任务完成不代表报告中的每一项结论都已经得到验证。",
+  "items": [
+    {"id":"ANSWER-QUALITY","phase":"仓库分析","title":"报告结论仍需核对","status":"pending","detail":"模型可能遗漏重要逻辑或把局部代码误解为整个项目的行为，关键结论需要按引用源码复核。"},
+    {"id":"MEMORY-TIMEOUT","phase":"项目记忆","title":"辅助抽取与摘要可能超时","status":"in_progress","detail":"已减少纯查询触发的记忆抽取；真实服务仍可能超时，失败时需要检查本回合的保存结果。"},
+    {"id":"EVAL-LIVE","phase":"评测中心","title":"真实模型基线尚未完整建立","status":"pending","detail":"内置题目用于开发对照，离线预设响应的成绩不能作为真实模型能力成绩。"},
+    {"id":"EVAL-METRICS","phase":"评测中心","title":"内容质量仍需要人工复核","status":"pending","detail":"自动检查能够验证部分格式与状态，不能完整判断引用是否支持结论或所有记忆是否使用正确。"},
+    {"id":"RAG-QUALITY","phase":"知识问答","title":"复杂PDF与无答案判断尚待完善","status":"in_progress","detail":"当前支持文字层PDF并检查引用位置；OCR、复杂排版和通用的无答案判断尚未实现。"},
+    {"id":"APP-HARDENING","phase":"运行与部署","title":"当前按本地单用户使用","status":"pending","detail":"多用户认证和生产部署尚未实现，容器运行与其他平台仍需要实际验收。"}
+  ]
+}

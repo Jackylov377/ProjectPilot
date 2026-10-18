@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "projectpilot"
+version = "0.1.0"
+description = "A local AI workbench for repository analysis and document retrieval, built on nanobot"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "licenses/*.txt"]
+requires-python = ">=3.11"
+dependencies = ["nanobot-ai==0.3.5", "python-dotenv>=1.0,<2", "mcp==1.30.0", "httpx==0.28.1", "pypdf==5.9.0", "fastapi==0.143.3", "uvicorn==0.54.0"]
+
+[project.scripts]
+projectpilot = "app.cli:main"
+projectpilot-web = "app.api.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/Jackylov377/ProjectPilot"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# Keep local credentials, personal documents and runtime data out of source archives.
+[tool.hatch.build.targets.sdist]
+include = [
+  "/app", "/licenses", "/examples/demo_project",
+  "/evals/datasets/agent_dev/tasks_v2.json", "/scripts/prepare_tokenizer.py",
+  "/LICENSE", "/THIRD_PARTY_NOTICES.md", "/README.md", "/pyproject.toml",
+  "/.env.example", "/.gitignore", "/.dockerignore", "/Dockerfile", "/compose.yaml",
+]
