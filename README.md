@@ -93,10 +93,14 @@ macOS / Linux 将 Python 路径换成 `.venv/bin/python`。doctor 只检查配�
 
 运行数据默认保存在 `runs/web/`，分词缓存位于 `.cache/tiktoken/`。关闭网页不会自动取消任务，需要在运行记录中停止。报告及最终回答以保存的结果为准，生成预览可能被后续纠正。
 
+运行失败时，在“运行记录”打开该任务，查看原因与处理建议。按页面显示的任务编号，可以在数据目录的 `jobs/<任务编号>/diagnostic.json` 查看脱敏诊断；该文件只保存在本地。损坏的历史任务会单独标为失败，原始文件保留，其他任务可继续使用。修改 `.env` 后需要重启服务。
+
 模型可能遗漏逻辑或作出过强推断；引用位置正确不代表结论正确。知识问答默认使用 BM25，尚未实现通用的无答案判断。自动记忆和摘要可能超时。当前没有多用户认证，按本地工作台使用。
 
 ## 仓库内容与许可证
 
 `app/` 包含后端与网页资源，`examples/demo_project/` 提供默认启动示例，`evals/datasets/agent_dev/tasks_v2.json` 为网页评测中心提供题目。`scripts/prepare_tokenizer.py` 用于准备分词资源。
+
+网页代码从 `app/api/static/app.js` 开始阅读，其中负责启动、导航和事件绑定；`app/api/static/js/` 按页面及任务职责组织具体逻辑。模块由浏览器直接加载，无需额外的前端构建步骤。
 
 ProjectPilot 复用 nanobot 的 Agent 循环、Provider 接口、工具注册与基础 Session，在此基础上实现应用工具、检索、记忆策略和工作台。新增代码采用 [MIT](LICENSE) 许可证，上游及依赖保留各自许可证，详见[第三方说明](THIRD_PARTY_NOTICES.md)。

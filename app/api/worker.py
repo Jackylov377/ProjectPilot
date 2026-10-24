@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 
+from app.api.diagnostics import failure_details
 from app.api.jobs import ROOT, read, write
 from app.api.streaming import AnswerPreview, PreviewHook, StreamingTrace
 from app.context import ContextOptions
@@ -24,6 +25,31 @@ from app.runtime.repository import RepositoryOptions
 from app.runtime.session import run_session, state_location
 
 
+def failure_events(trace):
+    events = []
+    try:
+        lines = trace.path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return {}, {}
+    for line in lines:
+        try:
+            record = json.loads(line)
+            if isinstance(record, dict):
+                events.append(record)
+        except ValueError:
+            continue
+    finished = next(
+        (event for event in reversed(events) if event.get("event") == "run.finished"),
+        {},
+    )
+    call = next(
+        (event for event in reversed(events) if event.get("event") == "llm.call"), {}
+    )
+    if call.get("finish_reason") != "error":
+        call = {}
+    return finished, call
+
+
 async def execute(directory):
     options = read(directory / "job.json")["request"]
     load_dotenv(ROOT / ".env", override=False)
@@ -36,7 +62,11 @@ async def execute(directory):
         if options["mode"] == "live":
             if not all(
                 os.environ.get(name)
-                for name in ("PROJECTPILOT_API_KEY", "PROJECTPILOT_MODEL", "PROJECTPILOT_API_BASE")
+                for name in (
+                    "PROJECTPILOT_API_KEY",
+                    "PROJECTPILOT_MODEL",
+                    "PROJECTPILOT_API_BASE",
+                )
             ):
                 raise ValueError("模型配置不完整")
             provider = OpenAICompatProvider(
@@ -71,7 +101,9 @@ async def execute(directory):
             workspace,
             trace,
             state_dir=state_location(
-                Path(options["data_dir"]) / "sessions" / engine, workspace, options["mode"]
+                Path(options["data_dir"]) / "sessions" / engine,
+                workspace,
+                options["mode"],
             ),
             session_id=options["session"],
             prompt=options["prompt"],
@@ -88,16 +120,38 @@ async def execute(directory):
             saved_messages=turn.saved_messages,
             tools_used=turn.tools_used,
             reports=[
-                {"name": Path(path).name, "text": Path(path).read_text(encoding="utf-8")}
+                {
+                    "name": Path(path).name,
+                    "text": Path(path).read_text(encoding="utf-8"),
+                }
                 for path in turn.saved_reports
             ],
         )
+        if turn.stop_reason != "completed":
+            _, call = failure_events(trace)
+            result.update(
+                failure_details(
+                    stop_reason=turn.stop_reason,
+                    error_kind=call.get("error_kind"),
+                    status_code=call.get("error_status_code"),
+                )
+            )
+            # Provider error bodies are not final answers and may contain request details.
+            result["answer"] = ""
     except Exception as exc:
-        events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
-        finished = next(
-            (event for event in reversed(events) if event["event"] == "run.finished"), {}
+        finished, call = failure_events(trace)
+        stop = finished.get("stop_reason", "error")
+        result.update(
+            stop_reason=stop,
+            exception_type=type(exc).__name__,
+            **failure_details(
+                stop_reason=stop,
+                exception=exc,
+                error_kind=call.get("error_kind"),
+                status_code=call.get("error_status_code"),
+            ),
         )
-        result.update(error=type(exc).__name__, stop_reason=finished.get("stop_reason", "error"))
+        trace.emit("worker.failed", **result)
     finally:
         write(directory / "result.json", trace.clean(result))
         client = getattr(provider, "_client", None)

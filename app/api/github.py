@@ -11,6 +11,7 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 
+from app.api.diagnostics import failure_details
 from app.api.jobs import read, write
 from app.observability.trace import JsonlTrace
 from app.tools.list_files import EXCLUDED_NAMES
@@ -42,7 +43,10 @@ def unpack(archive, destination):
     files, total, skipped = 0, 0, 0
     with ZipFile(archive) as bundle:
         entries = bundle.infolist()
-        if len(entries) > MAX_FILES or sum(item.file_size for item in entries) > MAX_EXTRACTED:
+        if (
+            len(entries) > MAX_FILES
+            or sum(item.file_size for item in entries) > MAX_EXTRACTED
+        ):
             raise ValueError("仓库解压后过大，请选择较小的仓库。")
         roots = set()
         for item in entries:
@@ -108,7 +112,9 @@ def import_repository(url, directory, trace):
         if response.status_code == 404:
             raise ValueError("仓库不存在或不是公开仓库，请检查链接。")
         if response.status_code != 200:
-            raise ValueError(f"GitHub下载失败（HTTP {response.status_code}），请稍后重试。")
+            raise ValueError(
+                f"GitHub下载失败（HTTP {response.status_code}），请稍后重试。"
+            )
         with archive.open("xb") as output:
             for block in response.iter_bytes(65536):
                 downloaded += len(block)
@@ -147,8 +153,19 @@ def main():
             if isinstance(exc, ValueError)
             else "获取源码失败，请检查网络或更换仓库后重试。"
         )
-        trace.emit("repository.import.failed", error=type(exc).__name__, message=message)
-        result = {"stop_reason": "error", "error": message}
+        trace.emit(
+            "repository.import.failed", error=type(exc).__name__, message=message
+        )
+        details = failure_details(
+            stop_reason=(
+                "github_timeout"
+                if isinstance(exc, httpx.TimeoutException)
+                else "github_connection"
+            )
+        )
+        result = {"stop_reason": "error", **details, "error": message}
+        if isinstance(exc, httpx.TimeoutException):
+            result["error"] = details["error"]
     write(directory / "result.json", result)
 
 

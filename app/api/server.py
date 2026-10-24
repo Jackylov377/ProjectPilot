@@ -78,7 +78,7 @@ def create_app(
     load_dotenv(ROOT / ".env", override=False)
     key = os.environ.get("PROJECTPILOT_API_KEY", "")
     cleaner = JsonlTrace(data_dir / "service-traces", secrets=(key,))
-    manager = JobManager(data_dir / "jobs")
+    manager = JobManager(data_dir / "jobs", secrets=(key,))
     live_enabled = allow_live and all(
         os.environ.get(name)
         for name in ("PROJECTPILOT_API_KEY", "PROJECTPILOT_MODEL", "PROJECTPILOT_API_BASE")
@@ -88,7 +88,11 @@ def create_app(
     async def lifespan(app):
         async def supervise():
             while True:
-                await asyncio.to_thread(manager.list)
+                try:
+                    await asyncio.to_thread(manager.list)
+                except OSError as exc:
+                    cleaner.emit("jobs.supervision.failed", error=type(exc).__name__)
+                    await asyncio.sleep(1)
                 await asyncio.sleep(0.25)
 
         watcher = asyncio.create_task(supervise())
@@ -354,9 +358,9 @@ def create_app(
             body = item["request"]
             if (
                 item["kind"] == "agent"
-                and body["engine"] == engine
-                and body["mode"] == mode
-                and body["workspace"] == source
+                and body.get("engine") == engine
+                and body.get("mode") == mode
+                and body.get("workspace") == source
             ):
                 found.setdefault(
                     body["session"], {"session": body["session"], "updated_at": item["created_at"]}
