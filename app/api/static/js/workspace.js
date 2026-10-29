@@ -32,6 +32,11 @@ export function updateSelectionHint() {
   const engine = $("#engine").value;
   $("#selected-documents").textContent = [...state.documents].join("、") || "尚未选择";
   $("#knowledge-selection").hidden = engine !== "knowledge";
+  const offline = $("#mode").value !== "live";
+  for (const option of $("#retriever").options) {
+    option.disabled = offline && option.value !== "bm25";
+  }
+  if (offline) $("#retriever").value = "bm25";
   $("#repository-settings").hidden = engine !== "repository";
 
   const selected = state.repositories.find(

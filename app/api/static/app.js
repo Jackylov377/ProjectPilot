@@ -59,6 +59,7 @@ async function startNewSession() {
 }
 
 async function changeMode() {
+  updateSelectionHint();
   $("#mode-note").textContent = $("#mode").value === "offline"
     ? "本地演示使用预设响应，仅验证操作流程。"
     : "将使用已配置的模型服务处理本次问题与资料。";

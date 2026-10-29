@@ -96,6 +96,9 @@ const progressTitles = {
   "llm.call": "模型请求已返回",
   "context.summary.saved": "已保存任务摘要",
   "memory.recalled": "已检索项目记忆",
+  "knowledge.retrieval_fallback": "检索服务不可用，已切换检索方式",
+  "knowledge.retrieval_completed": "资料检索完成",
+  "answer.finalizing": "正在根据已有证据整理回答",
   "session.verified": "会话已保存",
   "run.finished": "本次执行已结束",
 };

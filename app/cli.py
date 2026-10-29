@@ -15,6 +15,7 @@ from app.context import ContextOptions
 from app.memory.offline import OfflineMemoryProvider
 from app.memory.service import MemoryOptions
 from app.observability.trace import JsonlTrace
+from app.rag.pipeline import RETRIEVERS, configured_clients, retrieval_secrets
 from app.runtime.answer import AnswerValidationError
 from app.runtime.knowledge import KNOWLEDGE_PROMPT, KnowledgeOptions
 from app.runtime.offline import (
@@ -22,7 +23,11 @@ from app.runtime.offline import (
     OfflineKnowledgeProvider,
     OfflineRepositoryProvider,
 )
-from app.runtime.repository import REPOSITORY_PROMPT, RepositoryOptions, ToolExecutionLimit
+from app.runtime.repository import (
+    REPOSITORY_PROMPT,
+    RepositoryOptions,
+    ToolExecutionLimit,
+)
 from app.runtime.session import run_session, state_location
 from app.runtime.smoke import DEFAULT_PROMPT, run_smoke
 
@@ -30,6 +35,12 @@ from app.runtime.smoke import DEFAULT_PROMPT, run_smoke
 async def _run(args: argparse.Namespace) -> int:
     # Read only the explicitly named local file; do not discover parent .env files.
     load_dotenv(args.env_file, override=False)
+    if args.engine == "knowledge":
+        try:
+            configured_clients(args.retriever, allow_remote=args.mode == "live")
+        except ValueError as exc:
+            print(str(exc))
+            return 2
     key = os.getenv("PROJECTPILOT_API_KEY", "").strip()
     if args.mode == "live":
         base = os.getenv("PROJECTPILOT_API_BASE", "").strip()
@@ -55,7 +66,7 @@ async def _run(args: argparse.Namespace) -> int:
         if args.memory and args.engine == "session":
             provider_type = OfflineMemoryProvider
         provider = provider_type()
-    trace = JsonlTrace(args.trace_dir, secrets=(key,))
+    trace = JsonlTrace(args.trace_dir, secrets=retrieval_secrets())
     print(f"模式：{args.mode}；Trace：{trace.path}")
     try:
         session_engine = args.engine in {"session", "repository", "knowledge"}
@@ -101,6 +112,8 @@ async def _run(args: argparse.Namespace) -> int:
                     paths=tuple(args.knowledge_files),
                     max_chars=args.chunk_chars,
                     overlap_chars=args.chunk_overlap,
+                    retriever=args.retriever,
+                    allow_remote=args.mode == "live",
                     max_tool_calls=args.max_tool_calls,
                     max_repeated_calls=args.max_repeated_calls,
                 )
@@ -139,6 +152,8 @@ async def _run(args: argparse.Namespace) -> int:
         if client is not None:
             await client.close()
     print(trace.clean(result.final_content or "（没有最终回答）"))
+    for warning in getattr(result, "retrieval_warnings", []):
+        print(warning)
     print(f"停止原因：{result.stop_reason}；成功工具调用：{result.tools_used}")
     if args.engine in {"session", "repository", "knowledge"}:
         print(
@@ -180,6 +195,12 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--report-dir", type=Path, default=Path("runs/reports"))
     parser.add_argument("--knowledge-files", nargs="+", help="知识问答使用的工作区相对文档路径")
+    parser.add_argument(
+        "--retriever",
+        choices=RETRIEVERS,
+        default="bm25",
+        help="知识检索方式；非 BM25 需 live 模式及独立服务配置",
+    )
     parser.add_argument("--chunk-chars", type=int, default=1000, help="知识片段最大字符数，1～1000")
     parser.add_argument(
         "--chunk-overlap", type=int, default=0, help="同段落区域或 PDF 页内的重叠字符数"
@@ -205,6 +226,8 @@ def main() -> int:
     args = parser.parse_args()
     repository = args.engine == "repository"
     knowledge = args.engine == "knowledge"
+    if args.retriever != "bm25" and (not knowledge or args.mode != "live"):
+        parser.error("高级检索需要 --engine knowledge --mode live")
     if args.context_policy and args.engine == "smoke":
         parser.error("--context-policy 需要 session、repository 或 knowledge 模式")
     if (

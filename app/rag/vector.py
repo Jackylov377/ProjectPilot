@@ -13,22 +13,32 @@ from app.rag.retrieval import BM25Index, SearchHit
 class EmbeddingClient:
     """OpenAI-compatible embedding batches, using the explicitly configured provider."""
 
-    def __init__(self, api_base: str, api_key: str, model="text-embedding-v4", dimensions=256):
+    def __init__(
+        self,
+        api_base: str,
+        api_key: str,
+        model="text-embedding-v4",
+        dimensions=256,
+        timeout_seconds=30,
+    ):
         if not api_base or not api_key or dimensions < 1:
             raise ValueError("Configure the embedding endpoint, API key and positive dimensions")
         self.api_base, self.api_key = api_base.rstrip("/"), api_key
         self.model, self.dimensions = model, dimensions
         self.requests = []
+        self.attempts = 0
+        self.timeout_seconds = timeout_seconds
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         vectors = []
         with httpx.Client(
             base_url=self.api_base + "/",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            timeout=30,
+            timeout=self.timeout_seconds,
         ) as client:
             for start in range(0, len(texts), 10):
                 batch = texts[start : start + 10]
+                self.attempts += 1
                 response = client.post(
                     "embeddings",
                     json={
@@ -61,6 +71,7 @@ class EmbeddingClient:
             "model": self.model,
             "dimensions": self.dimensions,
             "requests": self.requests,
+            "attempts": self.attempts,
         }
 
 

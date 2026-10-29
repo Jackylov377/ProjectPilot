@@ -25,6 +25,7 @@ from app.api.streaming import latest_preview
 from app.memory import MemoryScope, MemoryStore
 from app.observability.trace import JsonlTrace
 from app.rag.ingestion import parse_document
+from app.rag.pipeline import Retriever, configured_clients, retrieval_secrets
 from app.runtime.session import state_location
 from app.tools.list_files import resolve_repository_path
 
@@ -42,6 +43,7 @@ class AgentRequest(BaseModel):
     context_policy: Literal["full", "window", "summary"] = "window"
     memory: bool = False
     documents: list[str] = Field(default_factory=list, max_length=20)
+    retriever: Retriever = "bm25"
     repository: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
@@ -76,9 +78,8 @@ def create_app(
             encoding="utf-8",
         )
     load_dotenv(ROOT / ".env", override=False)
-    key = os.environ.get("PROJECTPILOT_API_KEY", "")
-    cleaner = JsonlTrace(data_dir / "service-traces", secrets=(key,))
-    manager = JobManager(data_dir / "jobs", secrets=(key,))
+    cleaner = JsonlTrace(data_dir / "service-traces", secrets=retrieval_secrets())
+    manager = JobManager(data_dir / "jobs", secrets=retrieval_secrets())
     live_enabled = allow_live and all(
         os.environ.get(name)
         for name in ("PROJECTPILOT_API_KEY", "PROJECTPILOT_MODEL", "PROJECTPILOT_API_BASE")
@@ -208,7 +209,13 @@ def create_app(
         mode_check(body.mode)
         if not body.prompt.strip():
             raise HTTPException(422, "请输入问题。")
+        if body.retriever != "bm25" and body.engine != "knowledge":
+            raise HTTPException(422, "高级检索仅用于知识资料问答。")
         if body.engine == "knowledge":
+            try:
+                configured_clients(body.retriever, allow_remote=body.mode == "live")
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
             if not body.documents:
                 raise HTTPException(422, "请先选择至少一份知识资料。")
             for name in body.documents:

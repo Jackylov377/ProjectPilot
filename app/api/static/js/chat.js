@@ -65,6 +65,7 @@ export async function submitChat(event) {
     engine,
     mode: $("#mode").value,
     context_policy: $("#context-policy").value,
+    retriever: $("#engine").value === "knowledge" ? $("#retriever").value : "bm25",
     memory: $("#use-memory").checked,
     documents: [...state.documents],
     repository: engine === "repository" ? $("#repository-select").value || null : null,

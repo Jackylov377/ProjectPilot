@@ -8,6 +8,9 @@ const timelineEvents = new Set([
   "tool.finished",
   "context.summary.saved",
   "memory.recalled",
+  "knowledge.retrieval_fallback",
+  "knowledge.retrieval_completed",
+  "answer.finalizing",
   "run.finished",
   "repository.import.started",
   "repository.downloaded",
@@ -74,6 +77,9 @@ function appendSavedResult(container, job) {
     container.append(node("small", "排查编号：" + job.id + " · " + job.error_code));
   }
   if (job.result?.answer) container.append(node("pre", job.result.answer));
+  for (const warning of job.result?.retrieval_warnings || []) {
+    container.append(node("p", warning));
+  }
   for (const report of job.result?.reports || []) {
     const detail = node("details");
     detail.append(node("summary", "已保存报告 · " + report.name), node("pre", report.text));

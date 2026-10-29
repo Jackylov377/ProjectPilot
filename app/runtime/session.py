@@ -10,7 +10,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.context_governance import SNIP_SAFETY_BUFFER, ContextWindowExceededError
+from nanobot.agent.context_governance import (
+    SNIP_SAFETY_BUFFER,
+    ContextWindowExceededError,
+)
 from nanobot.agent.hook import AgentHook, AgentRunHookContext
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
@@ -30,7 +33,11 @@ from app.memory.offline import OfflineMemoryProvider
 from app.memory.service import MemoryContextBuilder, MemoryOptions, MemoryService
 from app.observability.trace import JsonlTrace, TraceHook
 from app.runtime.answer import AnswerRunner, AnswerValidationError
-from app.runtime.knowledge import KNOWLEDGE_INSTRUCTIONS, KnowledgeOptions, build_knowledge_tools
+from app.runtime.knowledge import (
+    KNOWLEDGE_INSTRUCTIONS,
+    KnowledgeOptions,
+    build_knowledge_tools,
+)
 from app.runtime.mcp import repository_mcp
 from app.runtime.repository import (
     REPOSITORY_INSTRUCTIONS,
@@ -87,6 +94,7 @@ class SessionTurnResult:
     saved_reports: list[str] = field(default_factory=list)
     memory_extraction_usage: dict | None = None
     summary_usage: dict | None = None
+    retrieval_warnings: list[str] = field(default_factory=list)
 
 
 def state_location(root: Path, workspace: Path, mode: str) -> Path:
@@ -118,16 +126,39 @@ class TracedSessionManager(SessionManager):
 class SessionTraceHook(TraceHook):
     result: AgentRunHookContext | None = None
 
-    def __init__(self, trace, budget=None, tools=None, *, answer_iterations=None):
+    def __init__(self, trace, budget=None, tools=None, *, answer_iterations=None,
+                 knowledge_search=None):
         super().__init__(trace)
         self.budget = budget
         self.tools = tools
         self.answer_iterations = answer_iterations
+        self.knowledge_search = knowledge_search
 
     async def before_iteration(self, context):
         # Leave one normal model request to answer after tool observations. A one-request
         # run still gets its initial retrieval; upstream preserves its exhausted status.
         if (
+            self.knowledge_search is not None
+            and self.knowledge_search.should_finalize
+            and self.tools.tool_names
+        ):
+            for name in list(self.tools.tool_names):
+                self.tools.unregister(name)
+            if self.budget:
+                self.budget.finalizing = True
+            context.messages.append({
+                "role": "system",
+                "content": TURN_NOTICE + "\n连续两次检索没有获得新片段，现在收尾，不再使用工具。"
+                "根据本回合已有证据直接回答并引用；证据不支持问题时明确资料不足，无法确认。"
+                "没有新片段不代表整份资料没有答案；不要猜测，不评价资料是否唯一或最新，"
+                "也不复述检索过程。",
+            })
+            self.trace.emit(
+                "answer.finalizing", reason="no_new_evidence", iteration=context.iteration,
+                completed_searches=self.knowledge_search.completed_searches,
+                consecutive_no_new_results=self.knowledge_search.no_new_chunk_streak,
+            )
+        elif (
             self.answer_iterations is not None
             and self.answer_iterations > 1
             and context.iteration == self.answer_iterations - 1
@@ -367,6 +398,7 @@ async def run_session(
         session = sessions.get_or_create(session_key)
         restored = len(session.messages)
         trace.emit("session.loaded", session_key=session_key, message_count=restored)
+        knowledge_pipeline = None
         if repository_options:
             tools = build_repository_tools(workspace, repository_options, trace)
             if repository_options.mcp_enabled:
@@ -374,7 +406,11 @@ async def run_session(
                     repository_mcp(workspace, tools, trace, repository_options.tool_timeout_seconds)
                 )
         elif knowledge_options:
-            tools = build_knowledge_tools(workspace, knowledge_options, trace)
+            tools = build_knowledge_tools(
+                workspace, knowledge_options, trace, cache_dir=state_dir / "rag-cache"
+            )
+            # Finalization removes tools from the registry; keep retrieval state separately.
+            knowledge_pipeline = tools.get("search_knowledge").pipeline
         else:
             tools = ToolRegistry()
             tools.register(ReadProjectNote(workspace))
@@ -386,7 +422,8 @@ async def run_session(
             else None
         )
         hook = SessionTraceHook(
-            trace, budget, tools, answer_iterations=None if repository_options else max_iterations
+            trace, budget, tools, answer_iterations=None if repository_options else max_iterations,
+            knowledge_search=tools.get("search_knowledge") if knowledge_options else None,
         )
         memory_service = None
         if memory_options:
@@ -499,6 +536,7 @@ async def run_session(
             list(budget.saved_reports) if budget else [],
             memory_service.extraction_usage if memory_service else None,
             loop.summary_service.usage if loop.summary_service else None,
+            list(knowledge_pipeline.warnings) if knowledge_pipeline else [],
         )
         trace.emit(
             "session.verified",
@@ -519,6 +557,7 @@ async def run_session(
             memory_extraction_usage=result.memory_extraction_usage,
             memory_extraction_ms=memory_service.extraction_ms if memory_service else 0,
             summary_usage=result.summary_usage,
+            retrieval_warnings=result.retrieval_warnings,
             summary_ms=loop.summary_service.duration_ms if loop.summary_service else 0,
         )
         return result

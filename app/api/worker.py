@@ -15,6 +15,7 @@ from app.api.streaming import AnswerPreview, PreviewHook, StreamingTrace
 from app.context import ContextOptions
 from app.memory.offline import OfflineMemoryProvider
 from app.memory.service import MemoryOptions
+from app.rag.pipeline import retrieval_secrets
 from app.runtime.knowledge import KnowledgeOptions
 from app.runtime.offline import (
     OfflineDemoProvider,
@@ -54,8 +55,8 @@ async def execute(directory):
     options = read(directory / "job.json")["request"]
     load_dotenv(ROOT / ".env", override=False)
     key = os.environ.get("PROJECTPILOT_API_KEY", "")
-    preview = AnswerPreview(directory / "answer-preview.jsonl", secrets=(key,))
-    trace = StreamingTrace(directory / "traces", preview, secrets=(key,))
+    preview = AnswerPreview(directory / "answer-preview.jsonl", secrets=retrieval_secrets())
+    trace = StreamingTrace(directory / "traces", preview, secrets=retrieval_secrets())
     provider = None
     result = {"answer": "", "stop_reason": "error", "trace_id": trace.run_id}
     try:
@@ -91,7 +92,11 @@ async def execute(directory):
         if engine == "repository":
             kwargs["repository_options"] = RepositoryOptions(directory / "reports")
         elif engine == "knowledge":
-            kwargs["knowledge_options"] = KnowledgeOptions(tuple(options["documents"]))
+            kwargs["knowledge_options"] = KnowledgeOptions(
+                tuple(options["documents"]),
+                retriever=options.get("retriever", "bm25"),
+                allow_remote=options["mode"] == "live",
+            )
         if options["memory"]:
             kwargs["memory_options"] = MemoryOptions(
                 Path(options["data_dir"]) / "memory.sqlite3", mode=options["mode"]
@@ -119,6 +124,7 @@ async def execute(directory):
             restored_messages=turn.restored_messages,
             saved_messages=turn.saved_messages,
             tools_used=turn.tools_used,
+            retrieval_warnings=turn.retrieval_warnings,
             reports=[
                 {
                     "name": Path(path).name,

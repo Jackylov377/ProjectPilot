@@ -44,6 +44,7 @@ async function refreshFinishedJob(job) {
   if (isCurrentConversation(job)) {
     await loadSessions();
     if (job.result?.reports?.length) notify("报告已保存，可在运行详情中查看正文。");
+    if (job.result?.retrieval_warnings?.length) notify(job.result.retrieval_warnings.join("\n"));
   }
   if (state.view === "runs") await loadRuns();
   if (job.kind === "evaluation" && state.view === "evaluations") await loadEvaluations();
