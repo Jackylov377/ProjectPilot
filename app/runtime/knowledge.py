@@ -15,7 +15,7 @@ KNOWLEDGE_PROMPT = "根据知识库说明单工具超时和整回合超时的区
 KNOWLEDGE_INSTRUCTIONS = """# ProjectPilot：知识问答
 
 使用 search_knowledge 检索本次显式提供的资料，再根据实际返回的原文回答。
-每个关键事实使用返回的 citation：文本文件为 source:start_line-end_line，PDF 为 source:p页码。
+每个关键事实直接使用返回的 citation 字段，例如 database.txt:27-62 或 guide.pdf:p3；不要额外添加 source: 前缀。
 只引用本回合检索实际返回的文件与行段／页码，不扩大范围或复用旧回合引用；引用格式正确仍不代表语义支持。
 PDF 页码是从 1 开始的物理页，不是页脚印刷编号；提取文本行号不作为 PDF 原始行号引用。
 引用必须支持旁边的断言，不能仅检查路径存在。

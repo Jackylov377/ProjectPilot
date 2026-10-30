@@ -42,7 +42,9 @@ def citation_violations(answer, evidence):
     filenames = r"[^\s`\"'<>\[\](){}（）【】《》“”‘’，。；：、]+?\.[A-Za-z][A-Za-z0-9_-]{0,11}"
     alternatives = [re.escape(source) for source in sorted(sources, key=len, reverse=True)]
     pattern = re.compile(
-        r"(?P<source>"
+        # A model may label a citation as source:database.txt:27-62. Consume
+        # that label separately; the filename and range still require evidence.
+        r"(?:source:\s*)?(?P<source>"
         + "|".join([*alternatives, filenames])
         + r"):(?P<location>p?\d+(?:-p?\d+)?)(?![\w-])"
     )
