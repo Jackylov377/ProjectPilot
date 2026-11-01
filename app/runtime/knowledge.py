@@ -49,6 +49,9 @@ class KnowledgeOptions:
     overlap_chars: int = 0
     retriever: str = "bm25"
     allow_remote: bool = False
+    manifest: tuple[dict, ...] = ()
+    data_dir: Path | None = None
+    project_workspace_id: str | None = None
 
 
 def build_knowledge_tools(
@@ -65,7 +68,12 @@ def build_knowledge_tools(
     documents = []
     unextracted_page_count = 0
     for path in dict.fromkeys(options.paths):
-        document = parse_document(workspace, path)
+        if options.manifest:
+            from app.workspace.documents import parsed_manifest_document
+            item = next(item for item in options.manifest if item["name"] == path)
+            document = parsed_manifest_document(options.data_dir, item, options.project_workspace_id)
+        else:
+            document = parse_document(workspace, path)
         chunks.extend(chunk_document(document, options.max_chars, options.overlap_chars))
         unextracted_page_count += len(document.pages_without_text)
         documents.append(

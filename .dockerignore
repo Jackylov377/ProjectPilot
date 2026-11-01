@@ -12,6 +12,7 @@
 !app/**
 !scripts/
 !scripts/prepare_tokenizer.py
+!scripts/inventory_workspace.py
 !examples/
 !examples/demo_project/
 !examples/demo_project/**

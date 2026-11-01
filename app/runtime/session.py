@@ -222,13 +222,38 @@ class ProjectPilotLoop(AgentLoop):
         memory_service=None,
         context_options=None,
         summary_service=None,
+        validity_service=None,
         **kwargs,
     ):
         self.trace = trace
         self.memory_service = memory_service
         self.context_options = context_options
         self.summary_service = summary_service
+        self.validity_service = validity_service
         super().__init__(*args, **kwargs)
+
+    def _persist_user_message_early(self, msg, session, runtime_context_blocks=None, **kwargs):
+        return super()._persist_user_message_early(
+            msg,
+            session,
+            runtime_context_blocks,
+            **{**kwargs, "projectpilot_run_id": self.trace.run_id},
+        )
+
+    def _save_turn(self, session, messages, skip, **kwargs):
+        # Tag the final answer within this save boundary, not an older answer
+        # with identical text. Session.get_history strips application metadata.
+        messages = list(messages)
+        for index in range(len(messages) - 1, skip - 1, -1):
+            message = messages[index]
+            if (
+                message.get("role") == "assistant"
+                and message.get("content")
+                and not message.get("tool_calls")
+            ):
+                messages[index] = {**message, "projectpilot_run_id": self.trace.run_id}
+                break
+        super()._save_turn(session, messages, skip, **kwargs)
 
     async def _build_turn(self, ctx):
         if self.memory_service or self.context_options or isinstance(self.runner, AnswerRunner):
@@ -260,6 +285,8 @@ class ProjectPilotLoop(AgentLoop):
             )
         if self.summary_service:
             await self.summary_service.prepare(self, ctx)
+        elif self.validity_service:
+            self.validity_service.refresh_request_history(self, ctx)
         if isinstance(self.runner, AnswerRunner):
             self.runner.user_sources = [
                 str(m.get("content", ""))
@@ -306,6 +333,8 @@ async def run_session(
     memory_options: MemoryOptions | None = None,
     context_options: ContextOptions | None = None,
     extra_hooks: tuple[AgentHook, ...] = (),
+    context_identity: str | None = None,
+    previous_workspaces: tuple[str, ...] = (),
 ) -> SessionTurnResult:
     """One CLI turn. Reuse state_dir/session_id in a new process to restore history.
 
@@ -366,7 +395,8 @@ async def run_session(
         }
         if repository_options
         else None,
-        knowledge_options=asdict(knowledge_options) if knowledge_options else None,
+        knowledge_options={**asdict(knowledge_options), "data_dir": str(knowledge_options.data_dir) if knowledge_options.data_dir else None}
+            if knowledge_options else None,
         memory_options={**asdict(memory_options), "path": str(memory_options.path.resolve())}
         if memory_options
         else None,
@@ -382,7 +412,7 @@ async def run_session(
         agent_workspace = state_dir / "workspace"
         agent_workspace.mkdir(parents=True, exist_ok=True)
         instructions = agent_workspace / "SOUL.md"
-        if execution_options or not instructions.exists():
+        if execution_options or repository_options or not instructions.exists():
             text = REPOSITORY_INSTRUCTIONS if repository_options else SESSION_INSTRUCTIONS
             if knowledge_options:
                 text = KNOWLEDGE_INSTRUCTIONS
@@ -432,17 +462,32 @@ async def run_session(
                 if repository_options
                 else ("knowledge" if knowledge_options else "session")
             )
-            scope = MemoryScope.for_workspace(
-                workspace, mode=memory_options.mode, engine=engine, owner_id=memory_options.owner_id
-            )
+            scope = memory_options.project_scope or MemoryScope.for_workspace(
+                workspace, mode=memory_options.mode, engine=engine, owner_id=memory_options.owner_id)
+            if memory_options.project_scope:
+                from app.memory.project import ProjectMemoryStore
+                memory_store = ProjectMemoryStore(memory_options.path, scope, trace)
+            else:
+                memory_store = MemoryStore(memory_options.path, scope, trace)
             memory_service = MemoryService(
-                MemoryStore(memory_options.path, scope, trace),
+                memory_store,
                 memory_options,
                 provider if memory_options.mode == "live" else OfflineMemoryProvider(),
                 trace,
             )
             if context_options:
                 memory_service.request_window_tokens = window_tokens
+        resolver = None
+        if knowledge_options and knowledge_options.manifest:
+            versions = {item["name"]: item["content_sha256"] for item in knowledge_options.manifest}
+            def resolver(ref):
+                return versions.get(ref["source"]) == ref["version"]
+        validity = SummaryService(
+            context_options, provider, trace, workspace, memory_service,
+            knowledge_options.paths if knowledge_options else (),
+            document_resolver=resolver, binding_identity=context_identity,
+            previous_workspaces=previous_workspaces,
+        ) if context_options else None
         loop = ProjectPilotLoop(
             MessageBus(),
             provider,
@@ -460,16 +505,9 @@ async def run_session(
             trace=trace,
             memory_service=memory_service,
             context_options=context_options,
-            summary_service=SummaryService(
-                context_options,
-                provider,
-                trace,
-                workspace,
-                memory_service,
-                knowledge_options.paths if knowledge_options else (),
-            )
-            if context_options and context_options.strategy == "summary"
-            else None,
+            summary_service=validity if context_options and context_options.strategy == "summary" else None,
+            validity_service=validity if context_identity and context_options and context_options.strategy != "summary"
+                and (memory_service or resolver) else None,
             tools_config=Config().tools,
         )
         if memory_service or not repository_options:

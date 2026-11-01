@@ -1,112 +1,80 @@
-import { api, post } from "./api.js";
-import { isCurrentConversation, loadSessions } from "./chat.js";
-import { loadEvaluations } from "./evaluations.js";
-import { loadRuns } from "./runs.js";
-import { state } from "./state.js";
-import { $, $$, handleAction, node, notify, progressLabel, setBusy, statusTitles } from "./ui.js";
-import { loadRepositories } from "./workspace.js";
+import {api, post} from './api.js?v=workspace-4-2';
+import {state, emit} from './state.js?v=workspace-4-2';
+import {isCurrentConversation, loadHistory, updateSendState} from './chat.js?v=workspace-4-2';
+import {$, node, action, notify, progressLabel, setBusy} from './ui.js?v=workspace-4-2';
 
-function startMessage(job) {
-  if (job.kind === "evaluation") return "评测已开始，可在运行记录中查看状态。";
-  if (job.kind === "repository_import") return "正在从GitHub获取源码，请稍候。";
-  return "任务已提交，正在准备。";
+let watchSequence = 0, recoveryTimer, cachedPreview;
+export function renderActive() {
+  const job = state.activeJob; $('#active-run').hidden = !job;
+  if (!job) return;
+  const p = state.projects.find(p => p.project_id === job.request.project_id);
+  const t = (state.tasks.get(job.request.project_id) || []).find(t => t.task_id === job.request.task_id);
+  $('#active-label').textContent = job.kind === 'agent' ? (p?.name || '项目') + ' / ' + (t?.name || '任务') + ' · 运行中' : job.kind === 'evaluation' ? '评测运行中' : '正在获取仓库源码';
+  $('#return-run').textContent = job.request.task_id ? '返回任务' : '查看运行';
 }
-
 function showAnswerPreview(job, preview) {
   if (!isCurrentConversation(job)) return;
-  const messages = $("#messages");
-  let article = messages.querySelector("[data-preview]");
-  if (!preview.text) {
-    if (article) article.remove();
-    return;
-  }
+  let article = $('#messages').querySelector('[data-preview]');
+  if (article && article.dataset.preview !== job.id) { article.remove(); article=null; }
+  if (!preview.text) { article?.remove(); return; }
   if (!article) {
-    article = node("article", undefined, "message assistant preview-message");
-    article.dataset.preview = job.id;
-    article.append(
-      node("span", "ProjectPilot · 生成预览，以最终保存结果为准", "message-label"),
-      node("div", "", "message-body"),
-    );
-    messages.append(article);
+    $('#messages .empty-copy')?.remove();
+    article = node('article',undefined,'message assistant preview-message'); article.dataset.preview=job.id;
+    article.append(node('span','生成预览 · 以最终结果为准','message-label'),node('div','','message-body')); $('#messages').append(article);
   }
-  article.querySelector(".message-body").textContent = preview.text;
-  messages.scrollTop = messages.scrollHeight;
+  article.querySelector('.message-body').textContent = preview.text;
+  $('#messages').scrollTop = $('#messages').scrollHeight;
 }
-
-async function refreshFinishedJob(job) {
-  if (job.kind === "repository_import" && job.status === "completed") {
-    $("#engine").value = "repository";
-    await loadRepositories(job.id);
-    $("#session").value = "repo-" + job.id.slice(0, 8);
-    await loadSessions();
-    notify("源码已导入，当前已选中该仓库。输入问题即可分析。");
-  }
-  if (isCurrentConversation(job)) {
-    await loadSessions();
-    if (job.result?.reports?.length) notify("报告已保存，可在运行详情中查看正文。");
-    if (job.result?.retrieval_warnings?.length) notify(job.result.retrieval_warnings.join("\n"));
-  }
-  if (state.view === "runs") await loadRuns();
-  if (job.kind === "evaluation" && state.view === "evaluations") await loadEvaluations();
-
-  if (job.status !== "completed") {
-    notify(job.error || "本次运行未完成，记录已保留。", true);
-  } else if (job.kind === "evaluation") {
-    notify("评测执行完成，具体通过情况请查看报告。");
-  }
+async function finish(job, sequence) {
+  if (sequence !== watchSequence) return;
+  state.events?.close(); state.events=null; clearTimeout(recoveryTimer); cachedPreview=null;
+  if (state.active === job.id) { state.active=null; state.activeJob=null; }
+  $('#active-progress').textContent=''; renderActive(); setBusy(false);
+  if (isCurrentConversation(job)) { $('#messages [data-preview]')?.remove(); await loadHistory(); emit('task:refresh'); }
+  if (job.kind === 'repository_import') emit('sources:changed');
+  emit('run:finished',{job}); emit('workspace:reload');
+  if (job.status !== 'completed') notify(job.error || '本次运行未完成，记录已保留。',true);
+  else if (isCurrentConversation(job) && job.result?.retrieval_warnings?.length) notify(job.result.retrieval_warnings.join('；'));
 }
-
-function finishJob(stream, job) {
-  stream.close();
-  state.events = null;
-  state.active = null;
-  setBusy(false);
-
-  // 生成预览可能被模型纠正；结束后重新读取已保存的历史作为最终结果。
-  $$("#messages [data-preview]").forEach((preview) => preview.remove());
-  $("#progress-text").textContent = job.status === "completed"
-    ? "运行已结束，结果已保存。"
-    : job.error || statusTitles[job.status];
-  return refreshFinishedJob(job);
-}
-
-export function watchJob(job) {
-  // 所有任务共享一个订阅，页面刷新后也通过已有运行记录恢复跟踪。
-  if (state.events) state.events.close();
-  state.active = job.id;
-  setBusy(true);
-  $("#progress-text").textContent = startMessage(job);
-
-  const stream = new EventSource("/api/jobs/" + job.id + "/events");
-  state.events = stream;
-  stream.addEventListener("progress", (event) => {
-    $("#progress-text").textContent = progressLabel(JSON.parse(event.data));
-  });
-  stream.addEventListener("answer", (event) => {
-    showAnswerPreview(job, JSON.parse(event.data));
-  });
-  stream.addEventListener("done", handleAction((event) => {
-    return finishJob(stream, JSON.parse(event.data));
-  }));
+export async function watchJob(job) {
+  if (job.status !== 'running') { if (isCurrentConversation(job)) await loadHistory(); emit('task:refresh'); return; }
+  if (state.active === job.id && state.events) return;
+  state.events?.close(); clearTimeout(recoveryTimer);
+  const sequence = ++watchSequence; state.active=job.id; state.activeJob=job;
+  renderActive(); setBusy(true); emit('workspace:render');
+  $('#active-progress').textContent='正在准备运行…';
+  const stream = new EventSource('/api/jobs/' + job.id + '/events'); state.events=stream;
+  const alive = () => sequence === watchSequence && state.active === job.id;
+  stream.addEventListener('progress', event => { if (alive()) $('#active-progress').textContent=progressLabel(JSON.parse(event.data)); });
+  stream.addEventListener('answer', event => { if (alive()) { cachedPreview={job,preview:JSON.parse(event.data)}; showAnswerPreview(job,cachedPreview.preview); } });
+  stream.addEventListener('status', event => { if (alive()) { const current=JSON.parse(event.data); if (current.status !== 'running') finish(current,sequence).catch(e => notify(e.message,true)); } });
+  stream.addEventListener('done', event => { if (alive()) finish(JSON.parse(event.data),sequence).catch(e => notify(e.message,true)); });
   stream.onerror = () => {
-    $("#progress-text").textContent = "正在重新连接进度，任务状态仍会保留。";
+    if (!alive()) return;
+    $('#active-progress').textContent='进度正在重连，执行状态以服务端为准。';
+    clearTimeout(recoveryTimer);
+    recoveryTimer=setTimeout(async () => {
+      if (!alive()) return;
+      try { const current=await api('/api/jobs/' + job.id); if (current.status !== 'running') await finish(current,sequence); }
+      catch { if (alive()) $('#active-progress').textContent='暂时无法核对运行，请恢复连接后刷新。'; }
+    },1500);
   };
+  updateSendState();
 }
-
 export async function restoreRunningJob() {
-  const jobs = await api("/api/jobs");
-  const running = jobs.find((job) => job.status === "running");
-  if (running) watchJob(running);
+  const jobs=await api('/api/jobs');
+  const running=jobs.find(j => j.status === 'running');
+  if (running) await watchJob(running);
+  else if (state.activeJob) await watchJob(await api('/api/jobs/' + state.activeJob.id));
 }
-
 export async function cancelActiveJob() {
-  if (state.active) await post("/api/jobs/" + state.active + "/cancel");
+  const id=state.active; if (!id) return;
+  const result=await post('/api/jobs/' + id + '/cancel');
+  if (state.active === id && result.status !== 'running') await finish(result,watchSequence);
+}
+export function returnToRun() {
+  const job=state.activeJob; if (!job) return;
+  emit('ui:navigate',job.request.task_id ? {view:'chat',projectId:job.request.project_id,taskId:job.request.task_id} : {view:'runs'});
 }
 
-export async function importRepository() {
-  if (state.active) return;
-  const url = $("#repository-url").value.trim();
-  if (!url) throw new Error("请先输入GitHub公开仓库的链接。");
-  const job = await post("/api/repositories/import", { url });
-  watchJob(job);
-}
+export function restorePreview() { if (cachedPreview && state.active === cachedPreview.job.id) showAnswerPreview(cachedPreview.job,cachedPreview.preview); }

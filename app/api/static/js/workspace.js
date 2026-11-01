@@ -1,68 +1,71 @@
-import { api } from "./api.js";
-import { state } from "./state.js";
-import { $ } from "./ui.js";
+import {api, post} from './api.js?v=workspace-4-2';
+import {state, saved, save, emit, checkpoint} from './state.js?v=workspace-4-2';
+import {$, node, action, handleAction, empty} from './ui.js?v=workspace-4-2';
+import {showTaskForm, showProjectForm, showProjectDetails, rename} from './forms.js?v=workspace-4-2';
 
-const repositoryStorageKey = "projectpilot.repository";
-
-function repositoryScope(engine) {
-  const repository = $("#repository-select").value;
-  return engine === "repository" && repository
-    ? "&repository=" + encodeURIComponent(repository)
-    : "";
+export {showTaskForm, showProjectForm, showProjectDetails};
+export async function loadTree() {
+  const current = checkpoint();
+  const projects = await api('/api/projects');
+  const groups = await Promise.all(projects.map(async p => [p.project_id, await api(`/api/projects/${p.project_id}/tasks`)]));
+  if (!current()) return;
+  state.projects = projects; state.tasks = new Map(groups);
+  if (projects.length) state.config.workspace_id = projects[0].workspace_id;
+  renderTree();
 }
-
-// 会话和记忆都按任务类型、运行模式及仓库隔离，避免切换后串用数据。
-export function sessionScope() {
-  const engine = $("#engine").value;
-  return "engine=" + encodeURIComponent(engine)
-    + "&mode=" + $("#mode").value + repositoryScope(engine);
-}
-
-export function memoryScope() {
-  const engine = $("#memory-engine").value;
-  return "engine=" + engine
-    + "&mode=" + $("#mode").value + repositoryScope(engine);
-}
-
-export function saveRepositorySelection() {
-  localStorage.setItem(repositoryStorageKey, $("#repository-select").value);
-}
-
-export function updateSelectionHint() {
-  const engine = $("#engine").value;
-  $("#selected-documents").textContent = [...state.documents].join("、") || "尚未选择";
-  $("#knowledge-selection").hidden = engine !== "knowledge";
-  const offline = $("#mode").value !== "live";
-  for (const option of $("#retriever").options) {
-    option.disabled = offline && option.value !== "bm25";
+export function renderTree() {
+  const root = $('#project-tree'); root.replaceChildren();
+  const hasProjects=state.projects.length > 0;
+  root.hidden=!hasProjects;
+  $('#project-tree-label').hidden=!hasProjects;
+  $('#workspace-navigation').hidden=!hasProjects;
+  if (!hasProjects) return;
+  const collapsed = saved('collapsed', []);
+  for (const project of state.projects) {
+    const id = project.project_id;
+    const group = node('div', undefined, 'project-group');
+    const row = node('div', undefined, 'project-row' + (state.projectId === id ? ' selected' : ''));
+    const toggle = action(collapsed.includes(id) ? '▸' : '▾', () => {
+      const next = saved('collapsed', []);
+      save('collapsed', next.includes(id) ? next.filter(x => x !== id) : [...next, id]); renderTree();
+    });
+    toggle.setAttribute('aria-label', '展开或收起 ' + project.name);
+    toggle.setAttribute('aria-expanded', String(!collapsed.includes(id)));
+    const title = action(project.name + (project.project_kind === 'repository' ? '［仓库］' : '［资料］'), () => emit('ui:navigate', {view:'chat', projectId:id, taskId:null}), 'tree-title');
+    const edit = action('⋯', () => rename(project)); edit.setAttribute('aria-label', '重命名项目 ' + project.name);
+    row.append(toggle, title, edit); group.append(row);
+    if (!collapsed.includes(id)) {
+      const children = node('div', undefined, 'task-rows');
+      for (const task of state.tasks.get(id) || []) {
+        const taskRow = node('div', undefined, 'task-row' + (task.task_id === state.taskId ? ' selected' : ''));
+        const open = action(task.name, () => emit('ui:navigate', {view:'chat', projectId:id, taskId:task.task_id}), 'tree-title');
+        if (state.activeJob?.request?.task_id === task.task_id) open.append(node('span', ' · 运行中', 'running-mark'));
+        const taskEdit = action('⋯', () => rename(task, true)); taskEdit.setAttribute('aria-label', '重命名任务 ' + task.name);
+        taskRow.append(open, taskEdit); children.append(taskRow);
+      }
+      children.append(action('＋ 新建任务', () => showTaskForm(project)));
+      group.append(children);
+    }
+    root.append(group);
   }
-  if (offline) $("#retriever").value = "bm25";
-  $("#repository-settings").hidden = engine !== "repository";
-
-  const selected = state.repositories.find(
-    (repository) => repository.id === $("#repository-select").value,
-  );
-  const imported = engine === "repository" && selected?.id;
-  if (state.config) {
-    $("#workspace-name").textContent = imported ? selected.name : state.config.workspace_name;
-    $("#workspace-path").textContent = imported ? selected.url : state.config.workspace;
-  }
 }
-
-export async function loadRepositories(preferred) {
-  state.repositories = await api("/api/repositories");
-  const select = $("#repository-select");
-  const current = preferred
-    ?? (select.value || localStorage.getItem(repositoryStorageKey) || "");
-
-  select.replaceChildren();
-  for (const repository of state.repositories) {
-    const title = repository.id ? repository.name : "启动时项目 · " + repository.name;
-    select.append(new Option(title, repository.id));
+export function projectOverview() {
+  $('#task-heading').textContent = state.task ? state.project.name + ' / ' + state.task.name : state.project?.name || '选择一个项目';
+  $('#project-details').hidden = !state.project;
+  $('#new-task').hidden = !state.project;
+  $('#project-overview').hidden = !!state.task;
+  $('#task-content').hidden = !state.task;
+  if (!state.task) {
+    const root = $('#project-overview'); root.replaceChildren();
+    if (!state.project) { root.append(node('h2', '从一个项目开始'), node('p', '选择侧边栏已有项目，或创建仓库／资料项目。', 'helper'), action('＋ 新建项目', showProjectForm, 'primary')); }
+    else {
+      root.append(node('h2', '项目任务'), node('p', state.project.project_kind === 'repository' ? state.project.source_locator : '独立资料集合', 'helper'));
+      const tasks = state.tasks.get(state.projectId) || [];
+      if (!tasks.length) root.append(node('p', '还没有任务。创建时主动选择模式、记忆权限和长对话策略。', 'helper'));
+      for (const task of tasks) root.append(action(task.name, () => emit('ui:navigate', {view:'chat', taskId:task.task_id}), 'task-link'));
+      root.append(action('＋ 新建任务', () => showTaskForm(state.project), 'primary'));
+    }
+    $('#task-subtitle').textContent = state.project ? '任务之间保持独立对话，项目资料和记忆按项目管理。' : '项目下的每个任务是一段独立对话。';
   }
-  select.value = state.repositories.some((repository) => repository.id === current)
-    ? current
-    : "";
-  saveRepositorySelection();
-  updateSelectionHint();
+  for (const element of document.querySelectorAll('.project-context')) element.textContent = state.project ? '当前项目：' + state.project.name : '请先在侧边栏选择项目。';
 }

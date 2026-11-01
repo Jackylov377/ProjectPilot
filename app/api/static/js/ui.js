@@ -71,16 +71,8 @@ export function date(value) {
 }
 
 export function setBusy(busy) {
-  for (const selector of [
-    "#send",
-    "#start-evaluation",
-    "#import-repository",
-    "#repository-select",
-  ]) {
-    $(selector).disabled = busy;
-  }
-  $("#cancel-job").hidden = !busy;
-  $("#job-status").textContent = busy ? "任务运行中" : "就绪";
+  for (const button of $$("[data-start-run]")) button.disabled = busy;
+  window.dispatchEvent(new CustomEvent('busy:changed'));
 }
 
 const progressTitles = {
@@ -108,7 +100,7 @@ const toolTitles = {
   list_files: "查看目录",
   read_file: "读取文件",
   search_code: "查找代码",
-  write_report: "保存报告",
+  write_report: "生成报告",
   search_knowledge: "检索资料",
 };
 
@@ -117,4 +109,22 @@ export function progressLabel(event) {
   // 导入事件没有工具名；聊天中的工具事件则补上具体工具的说明。
   if (event.event.startsWith("repository.")) return label;
   return label + (event.name ? " · " + (toolTitles[event.name] || event.name) : "");
+}
+
+export function action(text, callback, className = 'text-button') {
+  const button = node('button', text, className);
+  button.type = 'button'; button.onclick = handleAction(callback);
+  return button;
+}
+export function choose(title, message, options) {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'editor-dialog';
+    const close = value => { dialog.close(); dialog.remove(); resolve(value); };
+    dialog.append(node('h2', title), node('p', message, 'helper'));
+    const buttons = node('div', undefined, 'dialog-actions');
+    for (const [value, label] of options) buttons.append(action(label, () => close(value), value === 'cancel' ? 'secondary' : 'primary'));
+    dialog.append(buttons); dialog.oncancel = event => { event.preventDefault(); close('cancel'); };
+    document.body.append(dialog); dialog.showModal();
+  });
 }

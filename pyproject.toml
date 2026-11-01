@@ -27,6 +27,7 @@ packages = ["app"]
 include = [
   "/app", "/licenses", "/examples/demo_project",
   "/evals/datasets/agent_dev/tasks_v2.json", "/scripts/prepare_tokenizer.py",
+  "/scripts/inventory_workspace.py",
   "/LICENSE", "/THIRD_PARTY_NOTICES.md", "/README.md", "/pyproject.toml",
   "/.env.example", "/.gitignore", "/.dockerignore", "/Dockerfile", "/compose.yaml",
 ]

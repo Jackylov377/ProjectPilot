@@ -40,10 +40,13 @@ class SummaryService:
     fallible. Completed items mean user-reported progress, never tool validation.
     """
 
-    def __init__(self, options, provider, trace, workspace, memory=None, document_paths=()):
+    def __init__(self, options, provider, trace, workspace, memory=None, document_paths=(),
+                 document_resolver=None, binding_identity=None, previous_workspaces=()):
         self.options, self.provider, self.trace = options, provider, trace
         self.workspace, self.memory = workspace.resolve(), memory
         self.document_paths = set(document_paths)
+        self.document_resolver, self.binding_identity = document_resolver, binding_identity
+        self.previous_workspaces = set(previous_workspaces)
         self.usage = None
         self.duration_ms = 0
         self.timeout_seconds = 15
@@ -73,6 +76,10 @@ class SummaryService:
         key = (ref["source"], ref["version"])
         if key in self._document_validity:
             return self._document_validity[key]
+        if self.document_resolver is not None:
+            valid = self.document_resolver(ref)
+            self._document_validity[key] = valid
+            return valid
         if ref["source"] not in self.document_paths:
             return False
         path = (self.workspace / ref["source"]).resolve()
@@ -179,6 +186,8 @@ class SummaryService:
             if any(m.source.quote in text or m.value in text for m in stale):
                 continue
             if not all(self._valid_document(ref) for ref in self._documents(group)):
+                if self.document_resolver is not None:
+                    ctx.history.extend(message for message in group if message.get("role") == "user")
                 continue
             ctx.history.extend(group)
         text = self._render(state)
@@ -187,6 +196,11 @@ class SummaryService:
         )
         ctx.transcript_input = loop._build_transcript_input(ctx)
         return loop.context.build_transcript(ctx.transcript_input, channel="cli")
+
+    def refresh_request_history(self, loop, ctx):
+        self._records = self.memory.store.list(include_history=True) if self.memory else []
+        self._document_validity = {}
+        return self._refresh_context(loop, ctx, {"items": [], "memory_refs": [], "evidence": []})
 
     async def prepare(self, loop, ctx):
         session, runtime = ctx.require_session(), ctx.require_runtime()
@@ -199,11 +213,16 @@ class SummaryService:
         if (session.last_archived or ctx.pending_summary) and not state:
             raise ValueError("summary 策略需要本项目检查点或未归档的会话，请使用新会话名")
         binding = {
-            "workspace": str(self.workspace),
+            "workspace": self.binding_identity or str(self.workspace),
             "memory_scope": asdict(self.memory.store.scope) if self.memory else None,
         }
         if state and state["binding"] != binding:
-            raise ValueError("检查点的工作区或记忆范围已改变，请使用新会话名")
+            if (self.binding_identity and state["binding"]["workspace"] in self.previous_workspaces
+                    and state["binding"].get("memory_scope") == binding["memory_scope"]):
+                state = json.loads(_json(state))
+                state["binding"] = binding
+            else:
+                raise ValueError("检查点的工作区或记忆范围已改变，请使用新会话名")
         state = (
             json.loads(_json(state))
             if state

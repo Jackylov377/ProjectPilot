@@ -56,8 +56,8 @@ class AnswerPreview:
 
 
 class StreamingTrace(JsonlTrace):
-    def __init__(self, directory, preview, *, secrets=()):
-        super().__init__(directory, secrets=secrets)
+    def __init__(self, directory, preview, *, secrets=(), run_id=None):
+        super().__init__(directory, secrets=secrets, run_id=run_id)
         self.preview = preview
 
     def emit(self, event, **data):

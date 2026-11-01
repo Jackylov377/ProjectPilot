@@ -156,7 +156,8 @@ class OfflineRepositoryProvider(OfflineDemoProvider):
             )
         else:
             return LLMResponse(
-                content=f"离线预设工具链已完成，报告已保存：{latest['path']}。这不是模型能力评测。"
+                content="离线预设工具链已完成，已生成运行报告，可在本次运行详情中查看和导出。"
+                "这不是模型能力评测，也不表示已执行正式保存。"
             )
         turn = sum(message.get("role") == "user" for message in messages)
         return LLMResponse(

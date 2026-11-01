@@ -15,6 +15,7 @@
 !/scripts/
 /scripts/*
 !/scripts/prepare_tokenizer.py
+!/scripts/inventory_workspace.py
 
 !/examples/
 /examples/*

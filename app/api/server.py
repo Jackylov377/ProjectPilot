@@ -21,13 +21,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.github import github_repository
 from app.api.jobs import ROOT, TERMINAL, BusyError, JobManager, read
+from app.api.workspace import install_workspace_api
 from app.api.streaming import latest_preview
 from app.memory import MemoryScope, MemoryStore
 from app.observability.trace import JsonlTrace
 from app.rag.ingestion import parse_document
-from app.rag.pipeline import Retriever, configured_clients, retrieval_secrets
-from app.runtime.session import state_location
-from app.tools.list_files import resolve_repository_path
+from app.rag.pipeline import Retriever, retrieval_secrets
 
 STATIC = Path(__file__).with_name("static")
 Engine = Literal["session", "repository", "knowledge"]
@@ -115,20 +114,28 @@ def create_app(
     async def local_origin(request, call_next):
         origin = request.headers.get("origin")
         if (
-            request.method in {"POST", "PUT", "DELETE"}
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and origin
             and origin != str(request.base_url).rstrip("/")
         ):
             from fastapi.responses import JSONResponse
 
             return JSONResponse({"detail": "请从本地工作台提交操作。"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    access, legacy = install_workspace_api(app, manager, workspace, data_dir, live_enabled, cleaner)
 
     def mode_check(mode):
         if mode == "live" and not live_enabled:
             raise HTTPException(400, "当前服务未启用真实模型；请使用本地演示模式。")
 
     def get_job(job_id):
+        service = access.get()
+        if service is not None and service.has_run(job_id):
+            return service.run(job_id)
         try:
             return manager.get(job_id)
         except KeyError:
@@ -175,10 +182,15 @@ def create_app(
         return {
             "workspace": str(workspace),
             "workspace_name": workspace.name,
+            "workspace_id": access.get().store.workspace_id if access.get() else None,
+            "storage_namespace": sha256(str(data_dir.resolve()).encode()).hexdigest(),
             "live_enabled": bool(live_enabled),
             "default_mode": "offline",
             "concurrency": 1,
             "github_import": True,
+            "task_api": True,
+            "legacy_write_enabled": False,
+            "task_execution": {"repository_memory_off": True, "knowledge": True, "memory": True},
         }
 
     @app.get("/api/health")
@@ -204,37 +216,18 @@ def create_app(
             raise HTTPException(422, str(exc)) from None
         return submit("repository_import", {"url": url}, 90)
 
-    @app.post("/api/chat", status_code=202)
-    def chat(body: AgentRequest):
-        mode_check(body.mode)
-        if not body.prompt.strip():
-            raise HTTPException(422, "请输入问题。")
-        if body.retriever != "bm25" and body.engine != "knowledge":
-            raise HTTPException(422, "高级检索仅用于知识资料问答。")
-        if body.engine == "knowledge":
-            try:
-                configured_clients(body.retriever, allow_remote=body.mode == "live")
-            except ValueError as exc:
-                raise HTTPException(422, str(exc)) from None
-            if not body.documents:
-                raise HTTPException(422, "请先选择至少一份知识资料。")
-            for name in body.documents:
-                try:
-                    path = resolve_repository_path(knowledge, name)
-                    if not path.is_file() or path.suffix.lower() not in {".txt", ".md", ".pdf"}:
-                        raise ValueError()
-                except (OSError, ValueError):
-                    raise HTTPException(422, "选中的资料不可用。") from None
-        options = {
-            **body.model_dump(),
-            "workspace": str(selected_workspace(body.engine, body.repository)),
-            "data_dir": str(data_dir),
-        }
-        return submit("agent", options, 115)
+    @app.post("/api/chat")
+    def chat():
+        from app.workspace.service import Problem
+        raise Problem("legacy_write_disabled", "旧发送入口已停止写入，请改用任务入口；旧历史仍可只读查看。", 410)
 
     @app.get("/api/jobs")
     def jobs():
-        return cleaner.clean(manager.list())
+        found = {job["id"]: job for job in manager.list()}
+        service = access.get()
+        if service is not None:
+            found.update({run["id"]: run for run in service.runs()})
+        return cleaner.clean(sorted(found.values(), key=lambda job: job["created_at"], reverse=True))
 
     @app.get("/api/jobs/{job_id}")
     def job(job_id: str):
@@ -242,19 +235,22 @@ def create_app(
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel(job_id: str):
-        get_job(job_id)
+        current = get_job(job_id)
+        if current["status"] != "running":
+            return cleaner.clean(current)
         return manager.cancel(job_id)
 
     def trace_records(job_id):
         get_job(job_id)
         records = []
-        for path in sorted((manager.path(job_id) / "traces").glob("*.jsonl")):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    # A concurrent append can leave the final line incomplete; retry next poll.
-                    break
+        for path in sorted((manager.directory / job_id / "traces").glob("*.jsonl")):
+            with path.open("rb") as handle:
+                for line in handle:
+                    try:
+                        records.append(json.loads(line))
+                    except ValueError:
+                        # Preserve complete lines even if the final UTF-8 character is partial.
+                        break
         return records
 
     @app.get("/api/jobs/{job_id}/trace")
@@ -266,7 +262,7 @@ def create_app(
         job = get_job(job_id)
         if job["status"] not in TERMINAL:
             raise HTTPException(409, "请在运行结束或停止后导出结果。")
-        directory = manager.path(job_id)
+        directory = manager.directory / job_id
         bundle = BytesIO()
         with ZipFile(bundle, "w", ZIP_DEFLATED) as archive:
             archive.writestr(
@@ -325,7 +321,7 @@ def create_app(
                         "event: progress\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
                     )
                 seen = len(records)
-                preview = latest_preview(manager.path(job_id) / "answer-preview.jsonl")
+                preview = latest_preview(manager.directory / job_id / "answer-preview.jsonl")
                 if preview and preview["sequence"] > answer_sequence:
                     answer_sequence = preview["sequence"]
                     yield (
@@ -359,45 +355,11 @@ def create_app(
 
     @app.get("/api/sessions")
     def sessions(engine: Engine = "session", mode: Mode = "offline", repository: str | None = None):
-        source = str(selected_workspace(engine, repository))
-        found = {}
-        for item in manager.list():
-            body = item["request"]
-            if (
-                item["kind"] == "agent"
-                and body.get("engine") == engine
-                and body.get("mode") == mode
-                and body.get("workspace") == source
-            ):
-                found.setdefault(
-                    body["session"], {"session": body["session"], "updated_at": item["created_at"]}
-                )
-        return list(found.values())
+        return cleaner.clean(legacy.scope(engine, mode, repository))
 
     @app.get("/api/sessions/{session_id}")
-    def session(
-        session_id: str,
-        engine: Engine = "session",
-        mode: Mode = "offline",
-        repository: str | None = None,
-    ):
-        from nanobot.session.manager import SessionManager
-
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
-            raise HTTPException(422, "会话名称格式不正确。")
-        state = state_location(
-            data_dir / "sessions" / engine, selected_workspace(engine, repository), mode
-        )
-        stored = SessionManager(
-            state / "workspace", sessions_root=state / "sessions"
-        ).get_or_create(f"projectpilot:{session_id}")
-        return cleaner.clean(
-            [
-                {"role": message["role"], "content": message.get("content", "")}
-                for message in stored.messages
-                if message["role"] in {"user", "assistant"} and message.get("content")
-            ]
-        )
+    def session(session_id: str, engine: Engine = "session", mode: Mode = "offline", repository: str | None = None):
+        return cleaner.clean(legacy.read_scoped(session_id, engine, mode, repository))
 
     @app.get("/api/documents")
     def documents():

@@ -10,11 +10,12 @@ from dotenv import load_dotenv
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 
 from app.api.diagnostics import failure_details
-from app.api.jobs import ROOT, read, write
+from app.api.jobs import ROOT, read, usage_from_trace, write
 from app.api.streaming import AnswerPreview, PreviewHook, StreamingTrace
 from app.context import ContextOptions
 from app.memory.offline import OfflineMemoryProvider
 from app.memory.service import MemoryOptions
+from app.memory.store import MemoryScope
 from app.rag.pipeline import retrieval_secrets
 from app.runtime.knowledge import KnowledgeOptions
 from app.runtime.offline import (
@@ -24,6 +25,8 @@ from app.runtime.offline import (
 )
 from app.runtime.repository import RepositoryOptions
 from app.runtime.session import run_session, state_location
+from app.workspace import WorkspaceStore
+from app.workspace.service import task_state_path
 
 
 def failure_events(trace):
@@ -56,7 +59,12 @@ async def execute(directory):
     load_dotenv(ROOT / ".env", override=False)
     key = os.environ.get("PROJECTPILOT_API_KEY", "")
     preview = AnswerPreview(directory / "answer-preview.jsonl", secrets=retrieval_secrets())
-    trace = StreamingTrace(directory / "traces", preview, secrets=retrieval_secrets())
+    trace = StreamingTrace(
+        directory / "traces",
+        preview,
+        secrets=retrieval_secrets(),
+        run_id=directory.name,
+    )
     provider = None
     result = {"answer": "", "stop_reason": "error", "trace_id": trace.run_id}
     try:
@@ -101,15 +109,55 @@ async def execute(directory):
             kwargs["memory_options"] = MemoryOptions(
                 Path(options["data_dir"]) / "memory.sqlite3", mode=options["mode"]
             )
+        state = state_location(Path(options["data_dir"]) / "sessions" / engine, workspace, options["mode"])
+        if options.get("task_id"):
+            metadata = WorkspaceStore(Path(options["data_dir"]) / "workspace.sqlite3")
+            task = metadata.get_task(options["task_id"])
+            with metadata._connection(write=False) as db:
+                admission = db.execute("SELECT envelope_json FROM task_runs WHERE run_id=?", (directory.name,)).fetchone()
+                previous = [json.loads(row[0])["workspace"] for row in db.execute(
+                    "SELECT envelope_json FROM task_runs WHERE task_id=?", (task.task_id,)).fetchall()]
+            if (
+                not admission or json.loads(admission[0]) != options
+                or options["engine"] != task.task_mode or options["memory"] is not task.memory_enabled
+                or options["context_policy"] != task.context_policy
+                or options["project_id"] != task.project_id or options["workspace_id"] != metadata.workspace_id
+                or options["session"] != task.task_id or options["history_key"] != task.history_key
+            ):
+                raise ValueError("Task execution does not match durable admission")
+            state = task_state_path(options["data_dir"], metadata.workspace_id,
+                                    task.project_id, task.task_id, options["mode"])
+            identity = f"project:{metadata.workspace_id}:{task.project_id}"
+            kwargs["context_identity"] = identity
+            kwargs["previous_workspaces"] = tuple(previous)
+            if task.task_mode == "knowledge":
+                context = options.get("knowledge_context")
+                if not context or not context.get("documents"):
+                    raise ValueError("Knowledge execution requires a pinned project manifest")
+                with metadata._connection(write=False) as db:
+                    for item in context["documents"]:
+                        row = db.execute("""SELECT v.*,d.name,d.media_type FROM document_versions v
+                            JOIN documents d ON v.document_id=d.document_id
+                            JOIN run_documents r ON r.version_id=v.version_id AND r.document_id=v.document_id
+                            WHERE r.run_id=? AND v.project_id=? AND v.document_id=? AND v.version_id=?""",
+                            (directory.name, task.project_id, item["document_id"], item["version_id"])).fetchone()
+                        if row is None or any(row[key] != value for key, value in item.items()):
+                            raise ValueError("Document manifest does not match durable publication")
+                kwargs["knowledge_options"] = KnowledgeOptions(
+                    tuple(item["name"] for item in context["documents"]), retriever=context["retriever"],
+                    allow_remote=options["mode"] == "live", manifest=tuple(context["documents"]),
+                    data_dir=Path(options["data_dir"]), project_workspace_id=identity,
+                )
+            if task.memory_enabled:
+                kwargs["memory_options"] = MemoryOptions(
+                    Path(options["data_dir"]) / "project-memory.sqlite3", mode=options["mode"],
+                    project_scope=MemoryScope.for_project(metadata.workspace_id, task.project_id, mode=options["mode"]),
+                )
         turn = await run_session(
             provider,
             workspace,
             trace,
-            state_dir=state_location(
-                Path(options["data_dir"]) / "sessions" / engine,
-                workspace,
-                options["mode"],
-            ),
+            state_dir=state,
             session_id=options["session"],
             prompt=options["prompt"],
             max_iterations=10 if engine == "repository" else 6,
@@ -159,6 +207,12 @@ async def execute(directory):
         )
         trace.emit("worker.failed", **result)
     finally:
+        result["usage"] = usage_from_trace(
+            directory,
+            run_id=trace.run_id,
+            mode=options["mode"],
+            stop_reason=result["stop_reason"],
+        )
         write(directory / "result.json", trace.clean(result))
         client = getattr(provider, "_client", None)
         if client:

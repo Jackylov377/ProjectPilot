@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.api.diagnostics import StderrCapture, clean_text, clean_value, failure_details
+from app.observability.usage import summarize_usage
 
 ROOT = Path(__file__).resolve().parents[2]
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -32,6 +33,33 @@ def write(path, value):
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def usage_from_trace(directory, *, run_id, mode, stop_reason):
+    """Recover only complete event lines from this task's own trace."""
+    events, incomplete = [], False
+    path = directory / "traces" / f"{run_id}.jsonl"
+    try:
+        with path.open("rb") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict) or not isinstance(
+                        event.get("event"), str
+                    ):
+                        raise ValueError("Invalid trace event")
+                    if event.get("run_id") != run_id:
+                        raise ValueError("Trace belongs to another task")
+                    events.append(event)
+                except ValueError:
+                    incomplete = True
+                    break  # A killed worker may leave a partial trailing line.
+    except (OSError, UnicodeError):
+        incomplete = True
+    usage = summarize_usage(events, mode=mode, stop_reason=stop_reason)
+    if incomplete and mode == "live":
+        usage["status"] = "incomplete"
+    return usage
 
 
 class BusyError(ValueError):
@@ -59,6 +87,7 @@ class JobManager:
                     error="服务曾中断；任务未自动重放。",
                     error_hint="请先查看已保存的结果，再决定是否重新提交。",
                 )
+                self._recover_usage(job)
                 self._save(job_id, job)
 
     @staticmethod
@@ -152,6 +181,7 @@ class JobManager:
 
     def _finish(self, job):
         job_id = job["id"]
+        self._recover_usage(job)
         capture = self.captures.pop(job_id, None)
         stderr = capture.finish() if capture else ""
         self._diagnose(
@@ -167,6 +197,42 @@ class JobManager:
             self._save(job_id, job)
         del self.processes[job_id]
 
+    def _recover_usage(self, job):
+        # Old receipts remain old: do not attach a new task's usage to them.
+        if (
+            job["kind"] != "agent"
+            or not self._valid_id(job.get("run_id"))
+            or job["request"].get("mode") not in {"live", "offline"}
+        ):
+            return
+        result = job.setdefault("result", {})
+        if not isinstance(result.get("usage"), dict):
+            try:
+                saved = read(self.path(job["id"]) / "result.json")
+                if (
+                    isinstance(saved, dict)
+                    and saved.get("trace_id") == job["run_id"]
+                    and isinstance(saved.get("usage"), dict)
+                ):
+                    result.update(clean_value(saved, self.secrets))
+            except (OSError, ValueError):
+                pass
+        if not isinstance(result.get("usage"), dict):
+            result["usage"] = clean_value(
+                usage_from_trace(
+                    self.path(job["id"]),
+                    run_id=job["run_id"],
+                    mode=job["request"]["mode"],
+                    stop_reason="completed"
+                    if job["status"] == "completed"
+                    else job.get("stop_reason", job["status"]),
+                ),
+                self.secrets,
+            )
+        if job["status"] != "completed" and result["usage"].get("mode") == "live":
+            result["usage"] = {**result["usage"], "status": "incomplete"}
+        result.setdefault("trace_id", job["run_id"])
+
     def path(self, job_id):
         if not self._valid_id(job_id):
             raise KeyError(job_id)
@@ -175,12 +241,14 @@ class JobManager:
             raise KeyError(job_id)
         return path
 
-    def submit(self, kind, request, *, timeout):
+    def submit(self, kind, request, *, timeout, job_id=None):
         with self.lock:
             for job in self.list():
                 if job["status"] == "running":
                     raise BusyError("当前已有任务运行，请等待完成或先停止它。")
-            job_id = uuid4().hex
+            job_id = uuid4().hex if job_id is None else job_id
+            if not self._valid_id(job_id):
+                raise ValueError("Invalid reserved job identity")
             directory = self.directory / job_id
             directory.mkdir()
             job = {
@@ -191,6 +259,8 @@ class JobManager:
                 "request": request,
                 "timeout": timeout,
             }
+            if kind == "agent":
+                job["run_id"] = job_id
             write(directory / "job.json", job)
             if kind == "agent":
                 command = [sys.executable, "-m", "app.api.worker", str(directory)]
@@ -233,6 +303,7 @@ class JobManager:
                 self._diagnose(
                     job_id, error_code="start_failed", exception_type=type(exc).__name__
                 )
+                self._recover_usage(job)
                 self._save(job_id, job)
                 return job
             self.processes[job_id] = (process, time.monotonic())

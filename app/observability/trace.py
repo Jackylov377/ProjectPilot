@@ -12,9 +12,9 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 
 
 class JsonlTrace:
-    def __init__(self, directory: Path, secrets: tuple[str, ...] = ()):
+    def __init__(self, directory: Path, secrets: tuple[str, ...] = (), *, run_id=None):
         directory.mkdir(parents=True, exist_ok=True)
-        self.run_id = uuid4().hex
+        self.run_id = run_id or uuid4().hex
         self.path = directory / f"{self.run_id}.jsonl"
         self._secrets = tuple(secret for secret in secrets if secret)
         self._start = time.perf_counter()

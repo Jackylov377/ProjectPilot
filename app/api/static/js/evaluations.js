@@ -1,5 +1,6 @@
-import { api, post } from "./api.js";
-import { $, $$, badge, empty, handleAction, node } from "./ui.js";
+import {checkpoint} from "./state.js?v=workspace-4-2";
+import { api, post } from "./api.js?v=workspace-4-2";
+import { $, $$, badge, empty, handleAction, node } from "./ui.js?v=workspace-4-2";
 
 const caseTitles = {
   "note-read": "读取项目介绍",
@@ -108,11 +109,15 @@ async function loadEvaluationCases() {
   }
 }
 
+let evaluationSequence=0, detailSequence=0;
 export async function loadEvaluations() {
+  const current=checkpoint(), sequence=++evaluationSequence; ++detailSequence;
+  $("#evaluation-detail").hidden=true;
   // 旧实验结果也可能含 summary，但没有评测分组，不能当作标准报告绘制。
   const reports = (await api("/api/evaluations")).filter(
     (report) => Array.isArray(report.summary?.groups),
   );
+  if (!current() || sequence !== evaluationSequence) return;
   const container = $("#evaluation-list");
   container.replaceChildren();
   if (!reports.length) empty(container, "还没有评测报告，可以先运行少量开发任务。");
@@ -121,7 +126,9 @@ export async function loadEvaluations() {
 }
 
 async function showEvaluation(id, name) {
+  const current=checkpoint(), sequence=++detailSequence;
   const report = await api("/api/evaluations/" + id);
+  if (!current() || sequence !== detailSequence) return;
   const container = $("#evaluation-detail");
   container.hidden = false;
   container.replaceChildren(
@@ -157,6 +164,6 @@ export async function submitEvaluation(event) {
     cases,
     configs,
     repeats: Number($("#eval-repeats").value),
-    mode: $("#mode").value,
+    mode: $("#eval-mode").value,
   });
 }

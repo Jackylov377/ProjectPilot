@@ -12,7 +12,7 @@ from nanobot.agent.context_governance import SNIP_SAFETY_BUFFER
 from nanobot.runtime_context import RuntimeContextBlock
 from nanobot.utils.helpers import estimate_prompt_tokens
 
-from app.memory.store import MemoryStore, Source
+from app.memory.store import MemoryScope, MemoryStore, Source
 from app.rag.retrieval import tokenize
 
 EXTRACTION_PROMPT = """PROJECTPILOT_MEMORY_EXTRACTION_V1
@@ -60,10 +60,14 @@ class MemoryOptions:
     token_budget: int = 800
     top_k: int = 5
     extraction_timeout: float = 15
+    project_scope: MemoryScope | None = None
 
     def __post_init__(self):
         if min(self.token_budget, self.top_k, self.extraction_timeout) <= 0:
             raise ValueError("Memory budgets must be positive")
+        if self.project_scope and (self.project_scope.engine != "project" or self.project_scope.mode != self.mode
+                                   or self.project_scope.owner_id != self.owner_id):
+            raise ValueError("Project memory permission scope does not match execution")
 
 
 def statements(prompt):

@@ -15,6 +15,26 @@ from uuid import uuid4
 from app.observability.trace import JsonlTrace
 
 
+MEMORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memories (
+    memory_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+    mode TEXT NOT NULL, engine TEXT NOT NULL,
+    kind TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN
+        ('candidate','active','superseded','revoked','duplicate')),
+    revision INTEGER NOT NULL, base_revision INTEGER NOT NULL,
+    session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+    message_id TEXT NOT NULL, quote TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    expires_at TEXT, supersedes_id TEXT, duplicate_of_id TEXT,
+    UNIQUE(owner_id, workspace_id, mode, engine, session_id, turn_id, key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_memory
+    ON memories(owner_id, workspace_id, mode, engine, key)
+    WHERE status = 'active';
+"""
+
 def _timestamp(value: datetime | None = None) -> str:
     value = value or datetime.now(timezone.utc)
     if value.tzinfo is None:
@@ -34,6 +54,12 @@ class MemoryScope:
         identity = os.path.normcase(str(workspace.resolve()))
         return cls(owner_id, hashlib.sha256(identity.encode()).hexdigest(), mode, engine)
 
+    @classmethod
+    def for_project(cls, workspace_id: str, project_id: str, *, mode="offline", owner_id="local"):
+        if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) for value in (workspace_id, project_id)):
+            raise ValueError("Stable workspace/project identities are required")
+        return cls(owner_id, f"project:{workspace_id}:{project_id}", mode, "project")
+
     def __post_init__(self):
         if not self.owner_id.strip() or not self.workspace_id.strip():
             raise ValueError("Memory owner and workspace must be nonempty")
@@ -41,6 +67,7 @@ class MemoryScope:
             "session",
             "repository",
             "knowledge",
+            "project",
         }:
             raise ValueError("Unknown memory mode or engine")
 
@@ -89,25 +116,7 @@ class MemoryStore:
         self.path, self.scope, self.trace = path.resolve(), scope, trace
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS memories (
-                    memory_id TEXT PRIMARY KEY,
-                    owner_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
-                    mode TEXT NOT NULL, engine TEXT NOT NULL,
-                    kind TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN
-                        ('candidate','active','superseded','revoked','duplicate')),
-                    revision INTEGER NOT NULL, base_revision INTEGER NOT NULL,
-                    session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
-                    message_id TEXT NOT NULL, quote TEXT NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    expires_at TEXT, supersedes_id TEXT, duplicate_of_id TEXT,
-                    UNIQUE(owner_id, workspace_id, mode, engine, session_id, turn_id, key)
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_memory
-                    ON memories(owner_id, workspace_id, mode, engine, key)
-                    WHERE status = 'active';
-            """)
+            db.executescript(MEMORY_SCHEMA)
 
     @contextmanager
     def _connection(self):

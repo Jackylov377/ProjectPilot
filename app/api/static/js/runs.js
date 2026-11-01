@@ -1,6 +1,7 @@
-import { api } from "./api.js";
-import { showGroups } from "./evaluations.js";
-import { $, badge, date, empty, handleAction, node, progressLabel } from "./ui.js";
+import {state, checkpoint, emit} from './state.js?v=workspace-4-2';
+import { api } from "./api.js?v=workspace-4-2";
+import { showGroups } from "./evaluations.js?v=workspace-4-2";
+import { $, badge, date, empty, handleAction, node, progressLabel, action } from "./ui.js?v=workspace-4-2";
 
 const timelineEvents = new Set([
   "run.started",
@@ -28,7 +29,9 @@ function runTitle(job) {
 function runContext(job) {
   if (job.kind === "evaluation") return "固定任务集";
   if (job.kind === "repository_import") return "仓库导入";
-  return job.request.session || job.id;
+  const project=state.projects.find(p => p.project_id === job.request.project_id);
+  const task=(state.tasks.get(job.request.project_id) || []).find(t => t.task_id === job.request.task_id);
+  return project ? project.name + ' / ' + (task?.name || '任务') : job.request.task_id ? '所属项目或任务不可用' : '改造前运行 · ' + (job.request.session || job.id);
 }
 
 function detailTitle(job) {
@@ -45,8 +48,11 @@ function requestDescription(job) {
   return "任务编号：" + job.id;
 }
 
+let listSequence=0, detailSequence=0;
 export async function loadRuns() {
+  const current=checkpoint(), sequence=++listSequence; ++detailSequence;
   const jobs = await api("/api/jobs");
+  if (!current() || sequence !== listSequence) return;
   const container = $("#runs-list");
   container.replaceChildren();
   if (!jobs.length) empty(container, "还没有运行记录。发送一条问题即可开始。");
@@ -82,7 +88,7 @@ function appendSavedResult(container, job) {
   }
   for (const report of job.result?.reports || []) {
     const detail = node("details");
-    detail.append(node("summary", "已保存报告 · " + report.name), node("pre", report.text));
+    detail.append(node("summary", "生成报告 · " + report.name), node("pre", report.text));
     container.append(detail);
   }
   if (job.kind === "evaluation" && job.result?.summary) {
@@ -109,7 +115,9 @@ function appendTrace(container, records) {
 }
 
 async function showRun(id) {
+  const current=checkpoint(), sequence=++detailSequence;
   const job = await api("/api/jobs/" + id);
+  if (!current() || sequence !== detailSequence) return;
   const container = $("#run-detail");
   container.replaceChildren();
   container.classList.remove("empty-copy");
@@ -122,7 +130,8 @@ async function showRun(id) {
     download.setAttribute("download", "");
     container.append(download);
   }
+  if (job.request?.task_id) container.append(action('打开所属任务',() => emit('ui:navigate',{view:'chat',projectId:job.request.project_id,taskId:job.request.task_id})));
   appendSavedResult(container, job);
   const records = await api("/api/jobs/" + id + "/trace");
-  appendTrace(container, records);
+  if (current() && sequence === detailSequence) appendTrace(container, records);
 }
