@@ -27,10 +27,11 @@ def task_state_path(data_dir, workspace_id, project_id, task_id, environment):
 
 
 class WorkspaceService:
-    def __init__(self, store: WorkspaceStore, manager, workspace: Path, data_dir: Path, *, live_enabled=False):
+    def __init__(self, store: WorkspaceStore, manager, workspace: Path, data_dir: Path, *, live_enabled=False, admit_live=None):
         self.store, self.manager = store, manager
         self.workspace, self.data_dir = workspace.resolve(), data_dir.resolve()
         self.live_enabled = live_enabled
+        self.admit_live = admit_live
         self.documents = ProjectDocuments(self)
         self.memories = ProjectMemories(self)
         # An accepted request with no process receipt is an interrupted attempt, not a queue.
@@ -258,6 +259,8 @@ class WorkspaceService:
                         self.memories.open(task.project_id, selected)
                     if any(job["status"] == "running" for job in self.manager.list()):
                         raise Problem("busy", "当前已有运行，请等待结束或停止后再发送。")
+                    if selected == "live" and self.admit_live is not None:
+                        self.admit_live()
                     run_id, now = uuid4().hex, timestamp()
                     envelope = dict(prompt=prompt, session=task.task_id, engine=task.task_mode,
                                     mode=selected, context_policy=task.context_policy, memory=task.memory_enabled,

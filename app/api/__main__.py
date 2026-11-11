@@ -1,6 +1,7 @@
 """python -m app.api launches the local workbench with one server worker."""
 
 import argparse
+import os
 from pathlib import Path
 
 import uvicorn
@@ -17,7 +18,8 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--allow-live", action="store_true", help="允许在界面选择已配置的真实模型")
     args = parser.parse_args()
-    app = create_app(workspace=args.workspace, data_dir=args.data_dir, allow_live=args.allow_live)
+    allow_live = args.allow_live or os.getenv("PROJECTPILOT_ALLOW_LIVE") == "1"
+    app = create_app(workspace=args.workspace, data_dir=args.data_dir, allow_live=allow_live)
     uvicorn.run(app, host=args.host, port=args.port, workers=1, log_level="warning")
 
 

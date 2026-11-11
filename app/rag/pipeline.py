@@ -15,6 +15,7 @@ import httpx
 
 from app.rag.rerank import RerankClient
 from app.rag.vector import EmbeddingClient, HybridIndex, VectorIndex, _normalize
+from app.redis_support import REDIS_URL, RedisUnavailable, RedisVectorCache
 
 Retriever = Literal["bm25", "vector", "hybrid", "hybrid_rerank"]
 RETRIEVERS = ("bm25", "vector", "hybrid", "hybrid_rerank")
@@ -91,16 +92,29 @@ class RetrievalPipeline:
         self.warnings = []
         self.lock = asyncio.Lock()
         self.cache_dir = None
+        self.redis_cache = None
         self.cache_hits = self.cache_misses = 0
-        if embedding and cache_dir is not None:
+        self.redis_cache_hits = 0
+        if embedding:
             # Endpoint, model and dimensions are part of the embedding space identity.
             namespace = json.dumps([embedding.api_base, embedding.model, embedding.dimensions])
-            self.cache_dir = Path(cache_dir) / hashlib.sha256(namespace.encode()).hexdigest()
+            self.cache_namespace = hashlib.sha256(namespace.encode()).hexdigest()
+            if cache_dir is not None:
+                self.cache_dir = Path(cache_dir) / self.cache_namespace
+            if url := os.getenv(REDIS_URL):
+                self.redis_cache = RedisVectorCache(url)
 
-    def _cache_path(self, chunk):
+    @staticmethod
+    def _chunk_key(chunk):
         # Chunk identity includes workspace, document content version and source span.
         identity = f"{chunk.workspace_id}:{chunk.chunk_id}"
-        return self.cache_dir / (hashlib.sha256(identity.encode()).hexdigest() + ".json")
+        return hashlib.sha256(identity.encode()).hexdigest()
+
+    def _cache_path(self, chunk):
+        return self.cache_dir / (self._chunk_key(chunk) + ".json")
+
+    def _redis_key(self, chunk):
+        return f"projectpilot:embedding:v1:{self.cache_namespace}:{self._chunk_key(chunk)}"
 
     def _valid_vector(self, vector):
         if not isinstance(vector, list) or len(vector) != self.embedding.dimensions:
@@ -141,20 +155,61 @@ class RetrievalPipeline:
                 with suppress(OSError):
                     temporary.unlink(missing_ok=True)
 
+    def _redis_unavailable(self):
+        self.redis_cache = None
+        self.trace.emit("knowledge.redis_cache_unavailable")
+
+    def _write_shared(self, items):
+        if self.redis_cache and items:
+            try:
+                self.redis_cache.write([(self._redis_key(chunk), vector) for chunk, vector in items])
+            except RedisUnavailable:
+                self._redis_unavailable()
+
+    def _read_vectors(self, chunks):
+        vectors = [None] * len(chunks)
+        if self.redis_cache:
+            try:
+                entries = self.redis_cache.read([self._redis_key(chunk) for chunk in chunks])
+            except RedisUnavailable:
+                self._redis_unavailable()
+            else:
+                for i, entry in enumerate(entries):
+                    if entry is not None:
+                        try:
+                            vectors[i] = self._valid_vector(json.loads(entry))
+                            self.redis_cache_hits += 1
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+        local_hits = []
+        for i, chunk in enumerate(chunks):
+            if vectors[i] is None:
+                vectors[i] = self._read_vector(chunk)
+                if vectors[i] is not None:
+                    local_hits.append((chunk, vectors[i]))
+        self._write_shared(local_hits)
+        return vectors
+
+    def _write_vectors(self, items):
+        for chunk, vector in items:
+            self._write_vector(chunk, vector)
+        self._write_shared(items)
+
     async def _build_dense(self):
-        vectors = [self._read_vector(chunk) for chunk in self.lexical.chunks]
+        chunks = list(self.lexical.chunks)
+        vectors = await asyncio.to_thread(self._read_vectors, chunks)
         missing = [i for i, vector in enumerate(vectors) if vector is None]
         self.cache_hits += len(vectors) - len(missing)
         self.cache_misses += len(missing)
         for start in range(0, len(missing), 10):
             indexes = missing[start : start + 10]
             batch = await asyncio.to_thread(
-                self.embedding.embed, [self.lexical.chunks[i].text for i in indexes]
+                self.embedding.embed, [chunks[i].text for i in indexes]
             )
             for i, vector in zip(indexes, batch, strict=True):
                 vectors[i] = self._valid_vector(vector)
-                self._write_vector(self.lexical.chunks[i], vectors[i])
-        self.dense = VectorIndex(list(self.lexical.chunks), vectors)
+            await asyncio.to_thread(self._write_vectors, [(chunks[i], vectors[i]) for i in indexes])
+        self.dense = VectorIndex(chunks, vectors)
 
     def _fallback(self, strategy, reason):
         self.effective = strategy
@@ -179,6 +234,7 @@ class RetrievalPipeline:
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
                 cache_hits=self.cache_hits,
                 cache_misses=self.cache_misses,
+                redis_cache_hits=self.redis_cache_hits,
                 # These request lists and cache counters are cumulative within the turn.
                 embedding=self.embedding.metadata() if self.embedding else None,
                 rerank=self.reranker.metadata() if self.reranker else None,

@@ -295,11 +295,13 @@ class JobManager:
             raise KeyError(job_id)
         return path
 
-    def submit(self, kind, request, *, timeout, job_id=None):
+    def submit(self, kind, request, *, timeout, job_id=None, admit=None):
         with self.lock:
             for job in self.list():
                 if job["status"] == "running":
                     raise BusyError("当前已有任务运行，请等待完成或先停止它。")
+            if admit is not None:
+                admit()
             job_id = uuid4().hex if job_id is None else job_id
             if not self._valid_id(job_id):
                 raise ValueError("Invalid reserved job identity")

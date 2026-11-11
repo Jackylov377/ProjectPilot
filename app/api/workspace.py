@@ -52,9 +52,10 @@ class RunCreate(Input):
 
 
 class WorkspaceAccess:
-    def __init__(self, manager, workspace, data_dir, live_enabled):
+    def __init__(self, manager, workspace, data_dir, live_enabled, admit_live=None):
         self.manager, self.workspace, self.data_dir = manager, Path(workspace), Path(data_dir)
         self.live_enabled, self.service = live_enabled, None
+        self.admit_live = admit_live
         self.lock = threading.RLock()
 
     def get(self, create=False):
@@ -65,7 +66,7 @@ class WorkspaceAccess:
                     return None
                 store = WorkspaceStore.upgrade(path) if path.exists() else WorkspaceStore.initialize(path)
                 self.service = WorkspaceService(store, self.manager, self.workspace, self.data_dir,
-                                                live_enabled=self.live_enabled)
+                                                live_enabled=self.live_enabled, admit_live=self.admit_live)
             return self.service
 
     def require(self):
@@ -75,15 +76,15 @@ class WorkspaceAccess:
         return service
 
 
-def install_workspace_api(app, manager, workspace, data_dir, live_enabled, cleaner):
-    access = WorkspaceAccess(manager, workspace, data_dir, live_enabled)
+def install_workspace_api(app, manager, workspace, data_dir, live_enabled, cleaner, *, admit_live=None):
+    access = WorkspaceAccess(manager, workspace, data_dir, live_enabled, admit_live)
     access.get()  # Recover existing admissions, but never create a DB for legacy readers.
     app.state.workspace = access
     legacy = LegacyHistory(data_dir, workspace)
 
     @app.exception_handler(Problem)
     async def problem(_request, exc):
-        return JSONResponse({"detail": exc.message, "error_code": exc.code}, status_code=exc.status)
+        return JSONResponse({"detail": exc.message, "error_code": exc.code}, status_code=exc.status, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_request, exc):

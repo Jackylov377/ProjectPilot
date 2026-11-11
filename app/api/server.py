@@ -29,6 +29,8 @@ from app.memory import MemoryScope, MemoryStore
 from app.observability.trace import JsonlTrace
 from app.rag.ingestion import parse_document
 from app.rag.pipeline import Retriever, retrieval_secrets
+from app.redis_support import REDIS_URL, LiveRateLimiter, RedisUnavailable
+from app.workspace.errors import Problem
 
 STATIC = Path(__file__).with_name("static")
 METRICS_HOST = "projectpilot"
@@ -94,6 +96,21 @@ def create_app(
         os.environ.get(name)
         for name in ("PROJECTPILOT_API_KEY", "PROJECTPILOT_MODEL", "PROJECTPILOT_API_BASE")
     )
+    redis_url = os.getenv(REDIS_URL)
+    live_limiter = LiveRateLimiter(redis_url) if live_enabled and redis_url else None
+
+    def admit_live():
+        try:
+            retry_after = live_limiter.retry_after()
+        except RedisUnavailable:
+            raise Problem("live_rate_limit_unavailable", "真实模型限流服务暂时不可用。", 503) from None
+        if retry_after:
+            raise Problem(
+                "live_rate_limited", f"真实模型请求达到上限，请在 {retry_after} 秒后重试。", 429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    live_admission = admit_live if live_limiter else None
 
     @asynccontextmanager
     async def lifespan(app):
@@ -130,6 +147,8 @@ def create_app(
                 with suppress(asyncio.CancelledError):
                     await task
             await asyncio.to_thread(manager.close)
+            if live_limiter:
+                await asyncio.to_thread(live_limiter.close)
 
     app = FastAPI(title="ProjectPilot 本地工作台", lifespan=lifespan)
     app.state.jobs = manager
@@ -167,7 +186,9 @@ def create_app(
             response.headers["Cache-Control"] = "no-cache"
         return response
 
-    access, legacy = install_workspace_api(app, manager, workspace, data_dir, live_enabled, cleaner)
+    access, legacy = install_workspace_api(
+        app, manager, workspace, data_dir, live_enabled, cleaner, admit_live=live_admission,
+    )
 
     def mode_check(mode):
         if mode == "live" and not live_enabled:
@@ -186,6 +207,8 @@ def create_app(
 
     def submit(kind, request, timeout):
         try:
+            if live_admission and request.get("mode") == "live":
+                return manager.submit(kind, request, timeout=timeout, admit=live_admission)
             return manager.submit(kind, request, timeout=timeout)
         except BusyError as exc:
             raise HTTPException(409, str(exc)) from None
@@ -260,7 +283,6 @@ def create_app(
 
     @app.post("/api/chat")
     def chat():
-        from app.workspace.service import Problem
         raise Problem("legacy_write_disabled", "旧发送入口已停止写入，请改用任务入口；旧历史仍可只读查看。", 410)
 
     @app.get("/api/jobs")

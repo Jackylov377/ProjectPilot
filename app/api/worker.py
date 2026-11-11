@@ -68,6 +68,10 @@ async def execute(directory):
     provider = None
     result = {"answer": "", "stop_reason": "error", "trace_id": trace.run_id}
     try:
+        context_options = ContextOptions(
+            strategy=options["context_policy"],
+            window_tokens=int(os.getenv("PROJECTPILOT_CONTEXT_WINDOW_TOKENS") or "24576"),
+        )
         if options["mode"] == "live":
             if not all(
                 os.environ.get(name)
@@ -162,7 +166,7 @@ async def execute(directory):
             prompt=options["prompt"],
             max_iterations=10 if engine == "repository" else 6,
             timeout_seconds=90,
-            context_options=ContextOptions(options["context_policy"]),
+            context_options=context_options,
             extra_hooks=(PreviewHook(preview),),
             **kwargs,
         )

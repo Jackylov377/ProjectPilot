@@ -91,6 +91,16 @@ Compose 启动后，在 [Prometheus](http://127.0.0.1:9090) 查询评测队列�
 
 更多部署细节见 [架构路线图](docs/docker-compose/ROADMAP.md)、[技术栈](docs/docker-compose/TECH_STACK.md)和[验收记录](docs/docker-compose/MISSION.md)。
 
+#### Redis 缓存与限流
+
+Compose 在内部网络启动 Redis。高级 RAG 检索会跨运行复用文档向量，Redis 缓存有效期为 24 小时。缓存键按工作空间、文档版本、切片范围、Embedding 服务、模型和维度隔离。Redis 未命中或暂时不可用时，沿用已有本地向量缓存，仍缺失的向量按原流程生成。查询向量随每次查询重新生成。
+
+在 `.env` 配置模型后，将 `PROJECTPILOT_ALLOW_LIVE` 设为 `1` 并重新运行 `docker compose up --build --wait`。真实模型对话和真实模型评测共用一个提交额度，默认在首个获准提交起的 60 秒内最多受理 5 次。可用 `PROJECTPILOT_LIVE_RATE_LIMIT` 和 `PROJECTPILOT_LIVE_RATE_WINDOW_SECONDS` 调整。超过额度时返回 `429` 和 `Retry-After`，Redis 不可用时真实模型提交返回 `503`。离线运行可以继续使用。
+
+用 `docker compose exec -T redis redis-cli PING` 检查 Redis 是否可达，预期返回 `PONG`。在同一项目中用真实模型对同一份资料执行两次语义检索，然后在「运行记录 → 查看详细过程数据」查看 `knowledge.retrieval_completed`。`redis_cache_hits > 0` 表示从 Redis 复用了文档向量。真实模型限流的复测步骤和结果见 [验收记录](docs/docker-compose/MISSION.md#真实模型复测)。
+
+源码运行可通过 `pip install -e '.[redis]'` 安装 Redis 客户端，并设置 `PROJECTPILOT_REDIS_URL` 指向专用 Redis 实例或逻辑数据库。
+
 ## 接入真实模型
 
 将 [.env.example](.env.example) 复制为本地 `.env`，填写服务地址、可用模型标识和自己的密钥。已有配置时直接编辑，不要覆盖。
@@ -100,6 +110,8 @@ Compose 启动后，在 [Prometheus](http://127.0.0.1:9090) 查询评测队列�
 | `PROJECTPILOT_API_BASE` | 模型服务的兼容 API 地址 |
 | `PROJECTPILOT_MODEL` | 账号实际可用的模型标识 |
 | `PROJECTPILOT_API_KEY` | 本地保存的服务密钥 |
+
+Web Agent 的上下文窗口默认是 24,576 tokens，可在 `.env` 中通过 `PROJECTPILOT_CONTEXT_WINDOW_TOKENS` 调整。仓库分析预留 3,072 tokens 用于输出，并保留 1,024 tokens 安全余量，默认输入上限为 20,480 tokens。调整时以所用模型和服务的上下文上限为准。Docker Compose 下修改后重新运行 `docker compose up --build --wait`。
 
 停止原服务，再运行：
 

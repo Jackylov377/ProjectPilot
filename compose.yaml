@@ -7,6 +7,21 @@ services:
         PROJECTPILOT_RABBITMQ_HOST: rabbitmq
         PROJECTPILOT_RABBITMQ_PASSWORD: ${PROJECTPILOT_RABBITMQ_PASSWORD:-projectpilot-local}
       PROJECTPILOT_METRICS_ENABLED: "1"
+      PROJECTPILOT_REDIS_URL: redis://redis:6379/0
+      PROJECTPILOT_LIVE_RATE_LIMIT: "${PROJECTPILOT_LIVE_RATE_LIMIT:-5}"
+      PROJECTPILOT_LIVE_RATE_WINDOW_SECONDS: "${PROJECTPILOT_LIVE_RATE_WINDOW_SECONDS:-60}"
+      PROJECTPILOT_ALLOW_LIVE: "${PROJECTPILOT_ALLOW_LIVE:-0}"
+      PROJECTPILOT_CONTEXT_WINDOW_TOKENS: "${PROJECTPILOT_CONTEXT_WINDOW_TOKENS:-}"
+      PROJECTPILOT_API_BASE: "${PROJECTPILOT_API_BASE:-}"
+      PROJECTPILOT_MODEL: "${PROJECTPILOT_MODEL:-}"
+      PROJECTPILOT_API_KEY: "${PROJECTPILOT_API_KEY:-}"
+      PROJECTPILOT_EMBEDDING_API_BASE: "${PROJECTPILOT_EMBEDDING_API_BASE:-}"
+      PROJECTPILOT_EMBEDDING_MODEL: "${PROJECTPILOT_EMBEDDING_MODEL:-}"
+      PROJECTPILOT_EMBEDDING_DIMENSIONS: "${PROJECTPILOT_EMBEDDING_DIMENSIONS:-256}"
+      PROJECTPILOT_EMBEDDING_API_KEY: "${PROJECTPILOT_EMBEDDING_API_KEY:-}"
+      PROJECTPILOT_RERANK_API_BASE: "${PROJECTPILOT_RERANK_API_BASE:-}"
+      PROJECTPILOT_RERANK_MODEL: "${PROJECTPILOT_RERANK_MODEL:-}"
+      PROJECTPILOT_RERANK_API_KEY: "${PROJECTPILOT_RERANK_API_KEY:-}"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -61,7 +76,19 @@ services:
       - ./app/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     restart: unless-stopped
+  redis:
+    image: redis:7.4.12-alpine3.22
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
 volumes:
   pilot-data:
   rabbit-data:
   prometheus-data:
+  redis-data:
