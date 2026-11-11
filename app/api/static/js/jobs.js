@@ -63,7 +63,7 @@ export async function watchJob(job) {
 }
 export async function restoreRunningJob() {
   const jobs=await api('/api/jobs');
-  const running=jobs.find(j => j.status === 'running');
+  const running=jobs.find(j => j.status === 'running' && j.execution !== 'queue');
   if (running) await watchJob(running);
   else if (state.activeJob) await watchJob(await api('/api/jobs/' + state.activeJob.id));
 }

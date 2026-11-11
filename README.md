@@ -19,7 +19,7 @@
 
 ## 安装与启动
 
-建议使用 Python 3.12。目前已验证 Windows / Python 3.12 的源码安装与离线流程；其他平台和容器部署仍需实际验收。
+源码运行建议使用 Python 3.12。也可以用下文的 Docker Compose 启动本地演示。
 
 先获取源码：
 
@@ -51,6 +51,45 @@ python3 -m venv .venv
 首次安装需要联网下载依赖和固定的分词资源。打开 [本地工作台](http://127.0.0.1:8765)，保留启动终端，按 `Ctrl+C` 停止服务。
 
 当前网页可查看旧历史和运行；旧发送入口会明确提示改用任务接口。新任务的本地演示会执行工具并保存状态，但回答来自预设逻辑，只用于验证流程。
+
+### Docker Compose
+
+启动 Docker Desktop 或 Docker Engine 后，在仓库根目录运行：
+
+```bash
+docker compose up --build --wait
+docker compose ps
+```
+
+首次构建需要联网下载基础镜像、依赖和分词资源。服务健康后，打开[本地工作台](http://127.0.0.1:8765)。[健康接口](http://127.0.0.1:8765/api/health) 应返回 `{"status":"ok"}`。在工作台创建项目和任务即可使用「本地演示」，也可以在评测中心运行内置离线用例。
+
+Compose 同时启动 RabbitMQ 和 `evaluation-worker`。在评测中心提交离线评测后，可以在「运行记录」查看排队和运行状态，或取消评测。Worker 逐个消费评测任务，任务记录、评测报告和消息分别随应用卷和 RabbitMQ 卷保留。直接从源码启动时，评测沿用本地执行方式。
+
+查看日志和停止服务：
+
+```bash
+docker compose logs --tail 80 projectpilot
+docker compose logs --tail 80 evaluation-worker
+docker compose down
+```
+
+项目、任务和评测记录保存在 `pilot-data` 命名卷中。用同一 Compose 项目重新启动后可以继续查看这些记录。
+
+#### Prometheus 评测监控
+
+Compose 启动后，在 [Prometheus](http://127.0.0.1:9090) 查询评测队列。应用的 [指标端点](http://127.0.0.1:8765/metrics) 提供以下序列。
+
+| 指标 | 含义 |
+| --- | --- |
+| `projectpilot_evaluation_jobs{status="queued"}` | 当前排队数量。`status="running"` 表示正在执行。 |
+| `projectpilot_evaluation_jobs_finished_total` | 按完成、失败、取消和中断分别累计。 |
+| `projectpilot_evaluation_worker_retries_total` | Worker 首次认领之后的额外尝试数。 |
+| `projectpilot_evaluation_queue_wait_seconds` | 从提交到首次被 Worker 认领的等待时间直方图。 |
+| `projectpilot_evaluation_execution_seconds` | 最后一次认领到完成或失败的执行时间直方图。 |
+
+指标覆盖 RabbitMQ 离线评测。累计值来自应用 SQLite，Prometheus 历史保存在 `prometheus-data` 卷中。用 `up{job="projectpilot"}` 检查抓取状态。
+
+更多部署细节见 [架构路线图](docs/docker-compose/ROADMAP.md)、[技术栈](docs/docker-compose/TECH_STACK.md)和[验收记录](docs/docker-compose/MISSION.md)。
 
 ## 接入真实模型
 

@@ -1,5 +1,5 @@
 import {state, checkpoint, emit} from './state.js?v=workspace-4-2';
-import { api } from "./api.js?v=workspace-4-2";
+import { api, post } from "./api.js?v=workspace-4-2";
 import { showGroups } from "./evaluations.js?v=workspace-4-2";
 import { $, badge, date, empty, handleAction, node, progressLabel, action } from "./ui.js?v=workspace-4-2";
 
@@ -124,11 +124,19 @@ async function showRun(id) {
   container.append(badge(job.status), node("h4", detailTitle(job)), node("pre", requestDescription(job)));
   if (job.result?.repository) appendRepository(container, job.result.repository);
 
-  if (job.status !== "running") {
+  if (job.status !== "running" && job.status !== "queued") {
     const download = node("a", "导出本次结果（ZIP）", "text-button");
     download.href = "/api/jobs/" + job.id + "/export";
     download.setAttribute("download", "");
     container.append(download);
+  } else if (job.execution === "queue") {
+    container.append(action("取消评测", async () => {
+      await post("/api/jobs/" + id + "/cancel");
+      if (current() && sequence === detailSequence) {
+        await loadRuns();
+        if (current()) await showRun(id);
+      }
+    }));
   }
   if (job.request?.task_id) container.append(action('打开所属任务',() => emit('ui:navigate',{view:'chat',projectId:job.request.project_id,taskId:job.request.task_id})));
   appendSavedResult(container, job);

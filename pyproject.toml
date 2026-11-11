@@ -12,6 +12,10 @@ license-files = ["LICENSE", "licenses/*.txt"]
 requires-python = ">=3.11"
 dependencies = ["nanobot-ai==0.3.5", "python-dotenv>=1.0,<2", "mcp==1.30.0", "httpx==0.28.1", "pypdf==5.9.0", "fastapi==0.143.3", "uvicorn==0.54.0"]
 
+[project.optional-dependencies]
+queue = ["pika==1.3.2"]
+monitoring = ["prometheus-client==0.24.1"]
+
 [project.scripts]
 projectpilot = "app.cli:main"
 projectpilot-web = "app.api.__main__:main"

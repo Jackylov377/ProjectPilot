@@ -92,6 +92,14 @@ async function refreshWorkspace(refreshIdentity=false) {
   renderActive();
 }
 function on(name,handler) { window.addEventListener(name,handleAction(event => handler(event.detail))); }
+function queuedEvaluation() {
+  return state.config.evaluation_queue && $('#eval-mode').value === 'offline';
+}
+function updateEvaluationButton() {
+  const button = $('#start-evaluation');
+  button.toggleAttribute('data-start-run', !queuedEvaluation());
+  button.disabled = Boolean(state.active && !queuedEvaluation());
+}
 function bindEvents() {
   listen('#new-project','click',showProjectForm); listen('#new-task','click',() => showTaskForm(state.project)); listen('#project-details','click',showProjectDetails);
   listen('#chat-form','submit',submitChat); listen('#check-send','click',checkSend); listen('#prompt','input',saveDraft);
@@ -101,7 +109,14 @@ function bindEvents() {
   listen('#upload','change',uploadDocument); listen('#memory-mode','change',loadMemory); listen('#memory-history','change',loadMemory); listen('#refresh-memory','click',loadMemory);
   listen('#refresh-runs','click',loadRuns); listen('#refresh-evaluations','click',loadEvaluations);
   listen('#select-all-cases','click',() => { for (const option of $('#eval-cases').options) option.selected=true; });
-  listen('#eval-form','submit',async event => { if (state.active) { event.preventDefault(); return; } await watchJob(await submitEvaluation(event)); });
+  listen('#eval-mode','change',updateEvaluationButton);
+  listen('#eval-form','submit',async event => {
+    event.preventDefault();
+    if (state.active && !queuedEvaluation()) return;
+    const job = await submitEvaluation(event);
+    if (job.execution === 'queue') notify('评测已加入队列，可在运行记录查看或取消。');
+    else await watchJob(job);
+  });
   for (const id of ['legacy-kind','legacy-engine','legacy-mode','legacy-repository','legacy-memory-history']) listen('#' + id,'change',loadLegacy);
   listen('#legacy-upload','change',uploadLegacy); listen('#cancel-job','click',cancelActiveJob); listen('#return-run','click',returnToRun);
   listen('#tree-toggle','click',() => treeVisibility(!document.body.classList.contains('tree-open')));
@@ -123,6 +138,7 @@ async function initialize() {
     if (!state.config.storage_namespace) throw new Error('页面已更新，请重启工作台服务后继续使用。');
     $('#connection').textContent='本地已连接';
     $('#eval-mode option[value="live"]').disabled=!state.config.live_enabled;
+    updateEvaluationButton();
     bindEvents();
     await loadLegacySources();
     const route=location.hash ? readRoute() : saved('route',{view:'chat',projectId:null,taskId:null});

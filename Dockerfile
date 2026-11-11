@@ -7,7 +7,7 @@ COPY examples/demo_project ./examples/demo_project
 COPY evals/datasets/agent_dev/tasks_v2.json ./evals/datasets/agent_dev/tasks_v2.json
 COPY scripts/prepare_tokenizer.py ./scripts/prepare_tokenizer.py
 COPY scripts/inventory_workspace.py ./scripts/inventory_workspace.py
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[queue,monitoring]'
 RUN python scripts/prepare_tokenizer.py
 EXPOSE 8765
 CMD ["python", "-m", "app.api", "--host", "0.0.0.0", "--port", "8765"]

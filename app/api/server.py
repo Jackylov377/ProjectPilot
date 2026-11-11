@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from hashlib import sha256
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.evaluation_queue import DATABASE, RABBITMQ_HOST, EvaluationJobs, publish_pending
 from app.api.github import github_repository
 from app.api.jobs import ROOT, TERMINAL, BusyError, JobManager, read
 from app.api.workspace import install_workspace_api
@@ -29,6 +31,7 @@ from app.rag.ingestion import parse_document
 from app.rag.pipeline import Retriever, retrieval_secrets
 
 STATIC = Path(__file__).with_name("static")
+METRICS_HOST = "projectpilot"
 Engine = Literal["session", "repository", "knowledge"]
 Mode = Literal["offline", "live"]
 
@@ -79,6 +82,14 @@ def create_app(
     load_dotenv(ROOT / ".env", override=False)
     cleaner = JsonlTrace(data_dir / "service-traces", secrets=retrieval_secrets())
     manager = JobManager(data_dir / "jobs", secrets=retrieval_secrets())
+    queue_enabled = bool(os.getenv(RABBITMQ_HOST))
+    metrics_enabled = os.getenv("PROJECTPILOT_METRICS_ENABLED") == "1"
+    evaluation_jobs = (
+        EvaluationJobs(data_dir) if queue_enabled or metrics_enabled or (data_dir / DATABASE).is_file() else None
+    )
+    if queue_enabled:
+        from pika.exceptions import AMQPError
+
     live_enabled = allow_live and all(
         os.environ.get(name)
         for name in ("PROJECTPILOT_API_KEY", "PROJECTPILOT_MODEL", "PROJECTPILOT_API_BASE")
@@ -95,23 +106,53 @@ def create_app(
                     await asyncio.sleep(1)
                 await asyncio.sleep(0.25)
 
-        watcher = asyncio.create_task(supervise())
+        async def dispatch_evaluations():
+            unavailable = False
+            while True:
+                try:
+                    await asyncio.to_thread(publish_pending, evaluation_jobs)
+                    unavailable = False
+                except (AMQPError, OSError, sqlite3.Error) as exc:
+                    if not unavailable:
+                        cleaner.emit("evaluations.queue.unavailable", error=type(exc).__name__)
+                    unavailable = True
+                await asyncio.sleep(3 if unavailable else 0.5)
+
+        tasks = [asyncio.create_task(supervise())]
+        if queue_enabled:
+            tasks.append(asyncio.create_task(dispatch_evaluations()))
         try:
             yield
         finally:
-            watcher.cancel()
-            with suppress(asyncio.CancelledError):
-                await watcher
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
             await asyncio.to_thread(manager.close)
 
     app = FastAPI(title="ProjectPilot 本地工作台", lifespan=lifespan)
     app.state.jobs = manager
-    app.add_middleware(
-        TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver", "[::1]"]
-    )
+    allowed_hosts = ["127.0.0.1", "localhost", "testserver", "[::1]"]
+    if metrics_enabled:
+        from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
+
+        from app.observability.evaluation_metrics import EvaluationMetrics
+
+        registry = CollectorRegistry()
+        registry.register(EvaluationMetrics(evaluation_jobs))
+        allowed_hosts.append(METRICS_HOST)
+
+        @app.get("/metrics", include_in_schema=False)
+        def metrics():
+            return Response(generate_latest(registry), headers={"Content-Type": CONTENT_TYPE_LATEST})
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.middleware("http")
     async def local_origin(request, call_next):
+        if request.headers.get("host", "").partition(":")[0] == METRICS_HOST and request.url.path != "/metrics":
+            return Response("Invalid host header", status_code=400)
         origin = request.headers.get("origin")
         if (
             request.method in {"POST", "PUT", "PATCH", "DELETE"}
@@ -133,6 +174,8 @@ def create_app(
             raise HTTPException(400, "当前服务未启用真实模型；请使用本地演示模式。")
 
     def get_job(job_id):
+        if evaluation_jobs and (job := evaluation_jobs.get(job_id)):
+            return job
         service = access.get()
         if service is not None and service.has_run(job_id):
             return service.run(job_id)
@@ -170,12 +213,10 @@ def create_app(
         )
 
     def report_paths():
-        paths = {}
-        for root in {ROOT / "runs", data_dir / "evaluations"}:
-            for path in sorted(root.glob("*/report.json")):
-                identifier = sha256(str(path.resolve()).encode()).hexdigest()[:20]
-                paths[identifier] = path
-        return paths
+        files = [path for root in {ROOT / "runs", data_dir / "evaluations"} for path in sorted(root.glob("*/report.json"))]
+        if evaluation_jobs:
+            files.extend(path for path in evaluation_jobs.reports() if path.is_file())
+        return {sha256(str(path.resolve()).encode()).hexdigest()[:20]: path for path in files}
 
     @app.get("/api/config")
     def config():
@@ -187,6 +228,7 @@ def create_app(
             "live_enabled": bool(live_enabled),
             "default_mode": "offline",
             "concurrency": 1,
+            "evaluation_queue": queue_enabled,
             "github_import": True,
             "task_api": True,
             "legacy_write_enabled": False,
@@ -224,6 +266,8 @@ def create_app(
     @app.get("/api/jobs")
     def jobs():
         found = {job["id"]: job for job in manager.list()}
+        if evaluation_jobs:
+            found.update({job["id"]: job for job in evaluation_jobs.list()})
         service = access.get()
         if service is not None:
             found.update({run["id"]: run for run in service.runs()})
@@ -236,6 +280,8 @@ def create_app(
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel(job_id: str):
         current = get_job(job_id)
+        if current.get("execution") == "queue":
+            return cleaner.clean(evaluation_jobs.cancel(job_id))
         if current["status"] != "running":
             return cleaner.clean(current)
         return manager.cancel(job_id)
@@ -286,7 +332,7 @@ def create_app(
                                 path.relative_to(directory).as_posix(),
                                 cleaner.clean(path.read_text(encoding="utf-8")),
                             )
-            elif job["kind"] == "evaluation":
+            elif job["kind"] == "evaluation" and job["request"].get("output"):
                 output = Path(job["request"]["output"])
                 for name in ("manifest.json", "report.json", "report.txt"):
                     path = output / name
@@ -429,12 +475,12 @@ def create_app(
             or len(body.configs) != len(set(body.configs))
         ):
             raise HTTPException(422, "请选择有效且不重复的题目和配置。")
+        request = body.model_dump()
+        timeout = min(21600, (len(body.cases) or len(valid)) * len(body.configs) * body.repeats * 240)
+        if queue_enabled and body.mode == "offline":
+            return evaluation_jobs.submit(request, timeout)
         output = data_dir / "evaluations" / os.urandom(12).hex()
-        return submit(
-            "evaluation",
-            {**body.model_dump(), "output": str(output)},
-            min(21600, (len(body.cases) or len(valid)) * len(body.configs) * body.repeats * 240),
-        )
+        return submit("evaluation", {**request, "output": str(output)}, timeout)
 
     @app.get("/api/evaluations")
     def evaluations():

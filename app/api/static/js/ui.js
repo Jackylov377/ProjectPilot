@@ -3,6 +3,7 @@ export const $ = (selector) => document.querySelector(selector);
 export const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 export const statusTitles = {
+  queued: "排队中",
   running: "运行中",
   completed: "执行完成",
   failed: "失败",

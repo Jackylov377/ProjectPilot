@@ -1,10 +1,67 @@
 services:
   projectpilot:
     build: .
+    image: ${COMPOSE_PROJECT_NAME}-projectpilot
+    environment:
+      <<: &queue-environment
+        PROJECTPILOT_RABBITMQ_HOST: rabbitmq
+        PROJECTPILOT_RABBITMQ_PASSWORD: ${PROJECTPILOT_RABBITMQ_PASSWORD:-projectpilot-local}
+      PROJECTPILOT_METRICS_ENABLED: "1"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
       - pilot-data:/app/runs/web
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          from urllib.request import urlopen
+          urlopen('http://127.0.0.1:8765/api/health', timeout=2).close()
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+  evaluation-worker:
+    image: ${COMPOSE_PROJECT_NAME}-projectpilot
+    pull_policy: never
+    init: true
+    command: ["python", "-m", "app.api.evaluation_queue"]
+    environment: *queue-environment
+    volumes:
+      - pilot-data:/app/runs/web
+    depends_on:
+      projectpilot:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+  rabbitmq:
+    image: rabbitmq:4.2-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: projectpilot
+      RABBITMQ_DEFAULT_PASS: ${PROJECTPILOT_RABBITMQ_PASSWORD:-projectpilot-local}
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.5.5
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./app/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
     restart: unless-stopped
 volumes:
   pilot-data:
+  rabbit-data:
+  prometheus-data:

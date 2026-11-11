@@ -35,6 +35,60 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def evaluation_command(request):
+    command = [
+        sys.executable, "-m", "app.evaluation",
+        "--output", request["output"], "--configs", *request["configs"],
+        "--repeats", str(request["repeats"]),
+    ]
+    if request.get("cases"):
+        command += ["--cases", *request["cases"]]
+    if request["mode"] == "live":
+        command.append("--live")
+    return command
+
+
+def start_process(command):
+    return subprocess.Popen(
+        command,
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=os.name != "nt",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+
+
+def stop_process(process):
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait(timeout=10)
+
+
+def evaluation_result(output):
+    report = read(Path(output) / "report.json")
+    summary = report.get("summary") if isinstance(report, dict) else None
+    if not isinstance(summary, dict) or not isinstance(summary.get("groups"), list):
+        raise ValueError("Missing evaluation summary")
+    return {"summary": summary}
+
+
 def usage_from_trace(directory, *, run_id, mode, stop_reason):
     """Recover only complete event lines from this task's own trace."""
     events, incomplete = [], False
@@ -267,33 +321,9 @@ class JobManager:
             elif kind == "repository_import":
                 command = [sys.executable, "-m", "app.api.github", str(directory)]
             else:
-                command = [
-                    sys.executable,
-                    "-m",
-                    "app.evaluation",
-                    "--output",
-                    request["output"],
-                    "--configs",
-                    *request["configs"],
-                    "--repeats",
-                    str(request["repeats"]),
-                ]
-                if request.get("cases"):
-                    command += ["--cases", *request["cases"]]
-                if request["mode"] == "live":
-                    command += ["--live"]
+                command = evaluation_command(request)
             try:
-                process = subprocess.Popen(
-                    command,
-                    cwd=ROOT,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    start_new_session=os.name != "nt",
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
+                process = start_process(command)
             except OSError as exc:
                 job.update(
                     status="failed",
@@ -311,19 +341,7 @@ class JobManager:
             return job
 
     def _stop(self, process):
-        if process.poll() is not None:
-            return
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=10)
+        stop_process(process)
 
     def get(self, job_id):
         with self.lock:
@@ -352,17 +370,13 @@ class JobManager:
                         actual = Path(job["request"]["output"]) / "report.json"
                     if actual.is_file():
                         try:
-                            result = read(actual)
+                            result = (
+                                evaluation_result(job["request"]["output"])
+                                if job["kind"] == "evaluation" else read(actual)
+                            )
                             if not isinstance(result, dict):
                                 raise ValueError("Result must be an object")
-                            if job["kind"] == "evaluation":
-                                summary = result.get("summary")
-                                if not isinstance(summary, dict) or not isinstance(
-                                    summary.get("groups"), list
-                                ):
-                                    raise ValueError("Missing evaluation summary")
-                                result = {"summary": summary}
-                            elif not isinstance(result.get("stop_reason"), str):
+                            if job["kind"] != "evaluation" and not isinstance(result.get("stop_reason"), str):
                                 raise ValueError("Missing task stop reason")
                             job["result"] = result
                         except (OSError, ValueError, TypeError):
